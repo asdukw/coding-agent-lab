@@ -3,6 +3,10 @@ export type Role = "user" | "assistant" | "tool" | "system";
 export type Message = {
   role: Role;
   content: string;
+  /** Present on assistant messages that request tool calls. */
+  toolCalls?: { id: string; name: string; arguments: string }[];
+  /** Present on role:'tool' messages, linking back to the requesting call. */
+  toolCallId?: string;
 };
 
 export type TodoItem = {
