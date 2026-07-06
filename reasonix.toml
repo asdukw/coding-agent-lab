@@ -1,0 +1,2 @@
+[permissions]
+allow = ["Bash(cd \"C:\\\\Users\\\\asdukw\\\\workspace\\\\coding-agent-learn\" && git remote -v)", "Bash(cd \"C:\\\\Users\\\\asdukw\\\\workspace\\\\coding-agent-learn\" && gh repo create coding-agent-learn --private --source=. --remote=origin --push)"]
