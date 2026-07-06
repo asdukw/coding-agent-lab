@@ -1,12 +1,24 @@
 {
   "name": "coding-agent-learn",
-  "module": "index.ts",
   "type": "module",
   "private": true,
+  "bin": {
+    "cagent": "./bin/cagent"
+  },
+  "scripts": {
+    "start": "bun run src/main.tsx",
+    "dev": "bun --watch src/main.tsx",
+    "check": "tsc --noEmit",
+    "test": "bun test",
+    "test:deepseek": "bun test tests/deepseekConnectivity.test.ts"
+  },
   "devDependencies": {
     "@types/bun": "latest"
   },
   "peerDependencies": {
     "typescript": "^5"
+  },
+  "dependencies": {
+    "openai": "^6.45.0"
   }
 }
