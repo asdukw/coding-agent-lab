@@ -1,8 +1,9 @@
-import React, { useEffect, useState } from 'react'
-import { Box, Text, useApp } from 'ink'
+import React, { useCallback, useEffect, useState } from 'react'
+import { Box, Text } from 'ink'
+import TextInput from 'ink-text-input'
 import type { ModelClient } from '../model/client'
-import { query, type Terminal } from '../query'
-import { createInitialState } from '../state'
+import { query } from '../query'
+import { continueState, createInitialState, type AgentState } from '../state'
 
 export type AppProps = {
   task?: string
@@ -10,66 +11,70 @@ export type AppProps = {
   model: ModelClient
 }
 
+type Turn = {
+  user: string
+  assistant: string
+}
+
 export function App({ task, cwd, model }: AppProps) {
-  const { exit } = useApp()
   const [modelName, setModelName] = useState<string | undefined>()
-  const [assistantText, setAssistantText] = useState('')
-  const [terminal, setTerminal] = useState<Terminal | undefined>()
+  const [agentState, setAgentState] = useState<AgentState | undefined>()
+  const [history, setHistory] = useState<Turn[]>([])
+  const [streamingText, setStreamingText] = useState('')
+  const [status, setStatus] = useState<'idle' | 'running'>('idle')
+  const [input, setInput] = useState('')
   const [error, setError] = useState<string | undefined>()
-  const [, setIdleTick] = useState(0)
+
+  const runTurn = useCallback(
+    (text: string) => {
+      const trimmed = text.trim()
+      if (!trimmed || status === 'running') {
+        return
+      }
+
+      setStatus('running')
+      setStreamingText('')
+      setError(undefined)
+
+      const initialState = agentState ? continueState(agentState, trimmed) : createInitialState(trimmed, cwd)
+
+      let assistantText = ''
+
+      void (async () => {
+        try {
+          for await (const event of query({ initialState, model })) {
+            if (event.type === 'request_start') {
+              setModelName(event.model)
+            } else if (event.type === 'stream_delta') {
+              assistantText += event.content
+              setStreamingText(assistantText)
+            } else if (event.type === 'terminal') {
+              setAgentState(event.terminal.state)
+              setHistory(current => [...current, { user: trimmed, assistant: assistantText }])
+              setStreamingText('')
+              setStatus('idle')
+            }
+          }
+        } catch (caught) {
+          setError(caught instanceof Error ? caught.message : String(caught))
+          setStatus('idle')
+        }
+      })()
+    },
+    [agentState, cwd, model, status],
+  )
 
   useEffect(() => {
     if (task) {
-      return
+      runTurn(task)
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
-    const timer = setInterval(() => {
-      setIdleTick(current => current + 1)
-    }, 1_000)
-
-    return () => {
-      clearInterval(timer)
-    }
-  }, [task])
-
-  useEffect(() => {
-    if (!task) {
-      return
-    }
-
-    let canceled = false
-
-    void (async () => {
-      try {
-        const initialState = createInitialState(task, cwd)
-        for await (const event of query({ initialState, model })) {
-          if (canceled) {
-            return
-          }
-
-          if (event.type === 'request_start') {
-            setModelName(event.model)
-          } else if (event.type === 'stream_delta') {
-            setAssistantText(current => current + event.content)
-          } else if (event.type === 'message') {
-            setAssistantText(event.message.content)
-          } else if (event.type === 'terminal') {
-            setTerminal(event.terminal)
-            setTimeout(exit, 50)
-          }
-        }
-      } catch (caught) {
-        if (!canceled) {
-          setError(caught instanceof Error ? caught.message : String(caught))
-          exit()
-        }
-      }
-    })()
-
-    return () => {
-      canceled = true
-    }
-  }, [cwd, exit, model, task])
+  const handleSubmit = (value: string) => {
+    setInput('')
+    runTurn(value)
+  }
 
   return (
     <Box flexDirection="column" gap={1}>
@@ -79,32 +84,34 @@ export function App({ task, cwd, model }: AppProps) {
         {modelName ? <Text color="gray">model: {modelName}</Text> : null}
       </Box>
 
-      {task ? (
-        <Box flexDirection="column">
-          <Text color="green">user</Text>
-          <Text>{task}</Text>
+      {history.map((turn, index) => (
+        <Box flexDirection="column" key={index}>
+          <Box flexDirection="column">
+            <Text color="green">user</Text>
+            <Text>{turn.user}</Text>
+          </Box>
+          <Box flexDirection="column">
+            <Text color="blue">assistant</Text>
+            <Text>{turn.assistant}</Text>
+          </Box>
         </Box>
-      ) : (
-        <Box flexDirection="column">
-          <Text color="green">ready</Text>
-          <Text color="gray">No task submitted. Press Ctrl+C to exit.</Text>
-        </Box>
-      )}
+      ))}
 
-      {task ? (
+      {status === 'running' ? (
         <Box flexDirection="column">
           <Text color="blue">assistant</Text>
-          <Text>{assistantText || '...'}</Text>
+          <Text>{streamingText || '...'}</Text>
         </Box>
-      ) : null}
-
-      {terminal ? (
-        <Text color="gray">
-          done: {terminal.reason}, turns: {terminal.state.turn}
-        </Text>
       ) : null}
 
       {error ? <Text color="red">error: {error}</Text> : null}
+
+      {status === 'idle' ? (
+        <Box borderStyle="round" borderColor="cyan" paddingX={1}>
+          <Text color="green">{'> '}</Text>
+          <TextInput value={input} onChange={setInput} onSubmit={handleSubmit} placeholder="Type a message and press Enter..." />
+        </Box>
+      ) : null}
     </Box>
   )
 }

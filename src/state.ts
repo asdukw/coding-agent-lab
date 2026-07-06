@@ -71,3 +71,11 @@ export function createInitialState(task: string, cwd: string): AgentState {
     transition: { reason: "start" },
   };
 }
+
+export function continueState(prev: AgentState, task: string): AgentState {
+  return {
+    ...prev,
+    task,
+    messages: [...prev.messages, { role: "user", content: task }],
+  };
+}
