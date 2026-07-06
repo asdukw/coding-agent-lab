@@ -1,9 +1,9 @@
 import type { Message } from "../state";
-import type { Tools } from "../tools/types";
+import type { ToolSpec } from "../tools/types";
 
 export type ModelRequest = {
 	messages: Message[];
-	tools?: Tools;
+	toolSpecs?: ToolSpec[];
 };
 
 export type ModelStreamEvent =

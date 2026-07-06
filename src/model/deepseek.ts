@@ -3,8 +3,7 @@ import type {
 	ChatCompletionMessageParam,
 	ChatCompletionTool,
 } from "openai/resources/chat/completions";
-import { z } from "zod";
-import type { Tools } from "../tools/types";
+import type { ToolSpec } from "../tools/types";
 import type { ModelClient, ModelRequest, ModelStreamEvent } from "./client";
 
 export type DeepSeekModelOptions = {
@@ -31,7 +30,7 @@ export class DeepSeekModelClient implements ModelClient {
 		const stream = await this.client.chat.completions.create({
 			model: this.model,
 			messages: toOpenAIMessages(request),
-			tools: toOpenAITools(request.tools),
+			tools: toOpenAITools(request.toolSpecs),
 			stream: true,
 		});
 
@@ -71,7 +70,7 @@ export class DeepSeekModelClient implements ModelClient {
 }
 
 function toOpenAITools(
-	tools: Tools | undefined,
+	tools: ToolSpec[] | undefined,
 ): ChatCompletionTool[] | undefined {
 	if (!tools || tools.length === 0) {
 		return undefined;
@@ -82,7 +81,7 @@ function toOpenAITools(
 		function: {
 			name: tool.name,
 			description: tool.description,
-			parameters: z.toJSONSchema(tool.inputSchema) as Record<string, unknown>,
+			parameters: tool.inputSchema as Record<string, unknown>,
 		},
 	}));
 }

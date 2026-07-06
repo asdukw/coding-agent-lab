@@ -52,6 +52,22 @@ test("query executes a tool call and round-trips the result back to the model", 
 
 	expect(terminal?.reason).toBe("complete");
 	expect(terminal?.state.finalAnswer).toBe("The sum is 5");
+	expect(terminal?.state.toolSpecs).toEqual([
+		{
+			name: "add",
+			description: "Add two numbers",
+			inputSchema: {
+				$schema: "https://json-schema.org/draft/2020-12/schema",
+				additionalProperties: false,
+				properties: {
+					a: { type: "number" },
+					b: { type: "number" },
+				},
+				required: ["a", "b"],
+				type: "object",
+			},
+		},
+	]);
 
 	const toolMessage = terminal?.state.messages.find((m) => m.role === "tool");
 	expect(toolMessage?.toolCallId).toBe("call_1");

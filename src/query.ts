@@ -1,6 +1,6 @@
 import type { ModelClient } from "./model/client";
 import type { AgentState, Message } from "./state";
-import type { Tools } from "./tools/types";
+import { type Tools, toToolSpecs } from "./tools/types";
 
 export type QueryParams = {
 	initialState: AgentState;
@@ -40,8 +40,13 @@ export async function* query({
 	model,
 	tools,
 }: QueryParams): AsyncGenerator<QueryEvent, Terminal> {
+	const runtimeTools = tools ?? [];
 	let state: AgentState = {
 		...initialState,
+		toolSpecs:
+			initialState.toolSpecs.length > 0
+				? initialState.toolSpecs
+				: toToolSpecs(runtimeTools),
 		todos: [
 			{
 				id: "1",
@@ -81,7 +86,7 @@ export async function* query({
 
 		for await (const event of model.stream({
 			messages: state.messages,
-			tools,
+			toolSpecs: state.toolSpecs,
 		})) {
 			if (event.type === "text_delta") {
 				roundText += event.content;
@@ -143,7 +148,7 @@ export async function* query({
 			let args: Record<string, unknown> = {};
 
 			try {
-				const tool = tools?.find((t) => t.name === call.name);
+				const tool = runtimeTools.find((t) => t.name === call.name);
 				if (!tool) {
 					throw new Error(`unknown tool: ${call.name}`);
 				}

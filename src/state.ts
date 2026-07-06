@@ -1,3 +1,5 @@
+import type { ToolSpec } from "./tools/types";
+
 export type Role = "user" | "assistant" | "tool" | "system";
 
 export type Message = {
@@ -44,6 +46,7 @@ export type TransitionReason =
 export type AgentState = {
 	task: string;
 	cwd: string;
+	toolSpecs: ToolSpec[];
 	messages: Message[];
 	todos: TodoItem[];
 	observations: Observation[];
@@ -58,10 +61,15 @@ export type AgentState = {
 	};
 };
 
-export function createInitialState(task: string, cwd: string): AgentState {
+export function createInitialState(
+	task: string,
+	cwd: string,
+	tools: ToolSpec[] = [],
+): AgentState {
 	return {
 		task,
 		cwd,
+		toolSpecs: tools,
 		messages: [{ role: "user", content: task }],
 		todos: [],
 		observations: [],

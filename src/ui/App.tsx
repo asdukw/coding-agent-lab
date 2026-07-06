@@ -5,6 +5,7 @@ import type { ModelClient } from "../model/client";
 import { query } from "../query";
 import { type AgentState, continueState, createInitialState } from "../state";
 import { BUILTIN_TOOLS } from "../tools";
+import { toToolSpecs } from "../tools/types";
 
 export type AppProps = {
 	task?: string;
@@ -40,7 +41,7 @@ export function App({ task, cwd, model }: AppProps) {
 
 			const initialState = agentState
 				? continueState(agentState, trimmed)
-				: createInitialState(trimmed, cwd);
+				: createInitialState(trimmed, cwd, toToolSpecs(BUILTIN_TOOLS));
 
 			let assistantText = "";
 
