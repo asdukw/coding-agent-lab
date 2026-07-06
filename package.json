@@ -13,12 +13,15 @@
     "test:deepseek": "bun test tests/deepseekConnectivity.test.ts"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "@types/react": "^19.2.17"
   },
   "peerDependencies": {
     "typescript": "^5"
   },
   "dependencies": {
-    "openai": "^6.45.0"
+    "ink": "^7.1.0",
+    "openai": "^6.45.0",
+    "react": "^19.2.7"
   }
 }

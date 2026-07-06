@@ -1,21 +1,13 @@
-import { createInitialState } from './state'
-import { query } from './query'
+import React from 'react'
+import { render } from 'ink'
 import { createModelClientFromEnv } from './model'
+import { App } from './ui/App'
 
-async function main(): Promise<void> {
-  const task = process.argv.slice(2).join(' ') || 'Demonstrate the coding agent loop'
-  const state = createInitialState(task, process.cwd())
+function main(): void {
+  const task = process.argv.slice(2).join(' ') || undefined
   const model = createModelClientFromEnv()
 
-  for await (const event of query({ initialState: state, model })) {
-    if (event.type === 'request_start') {
-      console.error(`model: ${event.model}`)
-    } else if (event.type === 'stream_delta') {
-      process.stdout.write(event.content)
-    } else if (event.type === 'terminal') {
-      process.stdout.write('\n')
-    }
-  }
+  render(<App task={task} cwd={process.cwd()} model={model} />)
 }
 
-await main()
+main()
