@@ -1,6 +1,6 @@
 import { Box, Text } from "ink";
 import TextInput from "ink-text-input";
-import React, { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { ModelClient } from "../model/client";
 import { query } from "../query";
 import { type AgentState, continueState, createInitialState } from "../state";
@@ -13,6 +13,7 @@ export type AppProps = {
 };
 
 type Turn = {
+	id: string;
 	user: string;
 	assistant: string;
 };
@@ -59,7 +60,11 @@ export function App({ task, cwd, model }: AppProps) {
 							setAgentState(event.terminal.state);
 							setHistory((current) => [
 								...current,
-								{ user: trimmed, assistant: assistantText },
+								{
+									id: String(event.terminal.state.turn),
+									user: trimmed,
+									assistant: assistantText,
+								},
 							]);
 							setStreamingText("");
 							setStatus("idle");
@@ -74,11 +79,11 @@ export function App({ task, cwd, model }: AppProps) {
 		[agentState, cwd, model, status],
 	);
 
+	// biome-ignore lint/correctness/useExhaustiveDependencies: intentionally runs once on mount, not on every task/runTurn change
 	useEffect(() => {
 		if (task) {
 			runTurn(task);
 		}
-		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, []);
 
 	const handleSubmit = (value: string) => {
@@ -94,8 +99,8 @@ export function App({ task, cwd, model }: AppProps) {
 				{modelName ? <Text color="gray">model: {modelName}</Text> : null}
 			</Box>
 
-			{history.map((turn, index) => (
-				<Box flexDirection="column" key={index}>
+			{history.map((turn) => (
+				<Box flexDirection="column" key={turn.id}>
 					<Box flexDirection="column">
 						<Text color="green">user</Text>
 						<Text>{turn.user}</Text>

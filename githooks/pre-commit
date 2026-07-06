@@ -1,0 +1,9 @@
+#!/bin/sh
+
+set -eu
+
+echo "Running formatter..."
+bun run format
+
+echo "Running linter..."
+bun run lint

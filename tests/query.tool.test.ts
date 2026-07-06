@@ -5,6 +5,7 @@ import type {
 	ModelRequest,
 	ModelStreamEvent,
 } from "../src/model/client";
+import type { Terminal } from "../src/query";
 import { query } from "../src/query";
 import { createInitialState } from "../src/state";
 import type { Tool } from "../src/tools/types";
@@ -42,7 +43,7 @@ test("query executes a tool call and round-trips the result back to the model", 
 	const model = new FakeToolCallingModelClient();
 	const initialState = createInitialState("add 2 and 3", "/repo");
 
-	let terminal;
+	let terminal: Terminal | undefined;
 	for await (const event of query({ initialState, model, tools: [addTool] })) {
 		if (event.type === "terminal") {
 			terminal = event.terminal;
@@ -74,7 +75,7 @@ test("query feeds an error back as the tool result when the tool is unknown", as
 	const model = new FakeToolCallingModelClient();
 	const initialState = createInitialState("add 2 and 3", "/repo");
 
-	let terminal;
+	let terminal: Terminal | undefined;
 	for await (const event of query({ initialState, model, tools: [] })) {
 		if (event.type === "terminal") {
 			terminal = event.terminal;
@@ -119,7 +120,7 @@ test("query rejects arguments that fail the tool input schema before calling it"
 	const model = new FakeInvalidArgsModelClient();
 	const initialState = createInitialState("add 2 and 3", "/repo");
 
-	let terminal;
+	let terminal: Terminal | undefined;
 	for await (const event of query({
 		initialState,
 		model,

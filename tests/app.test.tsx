@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
 import { render } from "ink-testing-library";
-import React from "react";
 import { StubModelClient } from "../src/model/stub";
 import { App } from "../src/ui/App";
 

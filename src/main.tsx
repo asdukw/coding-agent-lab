@@ -1,5 +1,4 @@
 import { render } from "ink";
-import React from "react";
 import { createModelClientFromEnv } from "./model";
 import { App } from "./ui/App";
 
