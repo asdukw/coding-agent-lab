@@ -1,10 +1,10 @@
-import type { z } from 'zod'
+import type { z } from "zod";
 
 export type Tool<Input = unknown, Output = unknown> = {
-  name: string
-  description: string
-  inputSchema: z.ZodType<Input>
-  call(input: Input): Promise<Output>
-}
+	name: string;
+	description: string;
+	inputSchema: z.ZodType<Input>;
+	call(input: Input): Promise<Output>;
+};
 
-export type Tools = readonly Tool[]
+export type Tools = readonly Tool[];

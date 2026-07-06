@@ -1,13 +1,13 @@
-import React from 'react'
-import { render } from 'ink'
-import { createModelClientFromEnv } from './model'
-import { App } from './ui/App'
+import { render } from "ink";
+import React from "react";
+import { createModelClientFromEnv } from "./model";
+import { App } from "./ui/App";
 
 function main(): void {
-  const task = process.argv.slice(2).join(' ') || undefined
-  const model = createModelClientFromEnv()
+	const task = process.argv.slice(2).join(" ") || undefined;
+	const model = createModelClientFromEnv();
 
-  render(<App task={task} cwd={process.cwd()} model={model} />)
+	render(<App task={task} cwd={process.cwd()} model={model} />);
 }
 
-main()
+main();

@@ -1,30 +1,36 @@
 {
-  "name": "coding-agent-learn",
-  "type": "module",
-  "private": true,
-  "bin": {
-    "cagent": "./bin/cagent"
-  },
-  "scripts": {
-    "start": "bun run src/main.tsx",
-    "dev": "bun --watch src/main.tsx",
-    "check": "tsc --noEmit",
-    "test": "bun test",
-    "test:deepseek": "bun test tests/deepseekConnectivity.test.ts"
-  },
-  "devDependencies": {
-    "@types/bun": "latest",
-    "@types/react": "^19.2.17",
-    "ink-testing-library": "^4.0.0"
-  },
-  "peerDependencies": {
-    "typescript": "^5"
-  },
-  "dependencies": {
-    "ink": "^7.1.0",
-    "ink-text-input": "^6.0.0",
-    "openai": "^6.45.0",
-    "react": "^19.2.7",
-    "zod": "^4.4.3"
-  }
+	"name": "coding-agent-learn",
+	"type": "module",
+	"private": true,
+	"bin": {
+		"cagent": "./bin/cagent"
+	},
+	"scripts": {
+		"start": "bun run src/main.tsx",
+		"dev": "bun --watch src/main.tsx",
+		"check": "tsc --noEmit",
+		"test": "bun test",
+		"test:deepseek": "bun test tests/deepseekConnectivity.test.ts",
+		"lint": "biome check src tests package.json tsconfig.json",
+		"format": "biome format --write src tests package.json tsconfig.json",
+		"check:style": "biome check src tests package.json tsconfig.json",
+		"fix": "biome check --write src tests package.json tsconfig.json"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.5.2",
+		"@types/bun": "latest",
+		"@types/react": "^19.2.17",
+		"ink-testing-library": "^4.0.0"
+	},
+	"peerDependencies": {
+		"typescript": "^5"
+	},
+	"dependencies": {
+		"glob": "^13.0.6",
+		"ink": "^7.1.0",
+		"ink-text-input": "^6.0.0",
+		"openai": "^6.45.0",
+		"react": "^19.2.7",
+		"zod": "^4.4.3"
+	}
 }
