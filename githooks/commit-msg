@@ -1,0 +1,9 @@
+#!/bin/sh
+
+msg_file="$1"
+
+if grep -qi '^Co-authored-by:' "$msg_file"; then
+  echo "Error: Do not use Co-authored-by for AI assistance."
+  echo "Use Assisted-by instead."
+  exit 1
+fi
