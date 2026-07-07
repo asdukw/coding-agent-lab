@@ -6,6 +6,7 @@ import { query } from "../query";
 import { type AgentState, continueState, createInitialState } from "../state";
 import { BUILTIN_TOOLS } from "../tools";
 import { toToolSpecs } from "../tools/types";
+import { Markdown } from "./Markdown";
 
 export type AppProps = {
 	task?: string;
@@ -108,7 +109,7 @@ export function App({ task, cwd, model }: AppProps) {
 					</Box>
 					<Box flexDirection="column">
 						<Text color="blue">assistant</Text>
-						<Text>{turn.assistant}</Text>
+						<Markdown>{turn.assistant}</Markdown>
 					</Box>
 				</Box>
 			))}
@@ -116,7 +117,11 @@ export function App({ task, cwd, model }: AppProps) {
 			{status === "running" ? (
 				<Box flexDirection="column">
 					<Text color="blue">assistant</Text>
-					<Text>{streamingText || "..."}</Text>
+					{streamingText ? (
+						<Markdown>{streamingText}</Markdown>
+					) : (
+						<Text>...</Text>
+					)}
 				</Box>
 			) : null}
 
