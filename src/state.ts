@@ -1,4 +1,3 @@
-import { getPlanFilePath } from "./plan";
 import type { ToolSpec } from "./tools/types";
 
 export type Role = "user" | "assistant" | "tool" | "system";
@@ -38,15 +37,26 @@ export type BudgetState = {
 
 export type AgentMode = "normal" | "plan";
 
+export type PlanItemStatus = "pending" | "in_progress" | "completed";
+
+export type PlanItem = {
+	step: string;
+	status: PlanItemStatus;
+};
+
+export type RuntimePlan = {
+	explanation?: string;
+	items: PlanItem[];
+};
+
 export type PendingPlanApproval = {
 	plan: string;
-	planFilePath: string;
+	runtimePlan: RuntimePlan;
 };
 
 export type ToolPermissionContext = {
 	mode: AgentMode;
 	prePlanMode?: AgentMode;
-	planFilePath: string;
 	pendingPlanApproval?: PendingPlanApproval;
 };
 
@@ -66,6 +76,7 @@ export type AgentState = {
 	cwd: string;
 	toolSpecs: ToolSpec[];
 	toolPermissionContext: ToolPermissionContext;
+	plan: RuntimePlan;
 	messages: Message[];
 	todos: TodoItem[];
 	observations: Observation[];
@@ -89,7 +100,8 @@ export function createInitialState(
 		task,
 		cwd,
 		toolSpecs: tools,
-		toolPermissionContext: createToolPermissionContext(cwd),
+		toolPermissionContext: createToolPermissionContext(),
+		plan: createEmptyPlan(),
 		messages: [{ role: "user", content: task }],
 		todos: [],
 		observations: [],
@@ -113,22 +125,19 @@ export function continueState(prev: AgentState, task: string): AgentState {
 }
 
 export function createToolPermissionContext(
-	cwd: string,
+	_cwd?: string,
 ): ToolPermissionContext {
 	return {
 		mode: "normal",
-		planFilePath: getPlanFilePath(cwd),
 	};
 }
 
 export function ensureToolPermissionContext(state: AgentState): AgentState {
-	if (state.toolPermissionContext?.planFilePath) {
-		return state;
-	}
-
 	return {
 		...state,
-		toolPermissionContext: createToolPermissionContext(state.cwd),
+		toolPermissionContext:
+			state.toolPermissionContext ?? createToolPermissionContext(state.cwd),
+		plan: state.plan ?? createEmptyPlan(),
 	};
 }
 
@@ -148,6 +157,7 @@ export function enterPlanMode(prev: AgentState): AgentState {
 
 	return {
 		...state,
+		plan: createEmptyPlan(),
 		toolPermissionContext: {
 			...current,
 			mode: "plan",
@@ -160,7 +170,7 @@ export function enterPlanMode(prev: AgentState): AgentState {
 export function requestPlanApproval(
 	prev: AgentState,
 	plan: string,
-	planFilePath: string,
+	runtimePlan: RuntimePlan,
 ): AgentState {
 	const state = ensureToolPermissionContext(prev);
 
@@ -168,9 +178,20 @@ export function requestPlanApproval(
 		...state,
 		toolPermissionContext: {
 			...state.toolPermissionContext,
-			pendingPlanApproval: { plan, planFilePath },
+			pendingPlanApproval: { plan, runtimePlan },
 		},
 		transition: { reason: "plan_approval" },
+	};
+}
+
+export function updateRuntimePlan(
+	prev: AgentState,
+	plan: RuntimePlan,
+): AgentState {
+	const state = ensureToolPermissionContext(prev);
+	return {
+		...state,
+		plan,
 	};
 }
 
@@ -222,9 +243,13 @@ export function resolvePlanApproval(
 			...state.messages,
 			{
 				role: "user",
-				content: `User rejected the plan. Stay in plan mode, revise the plan file, and call ExitPlanMode again when ready.${feedbackText}`,
+				content: `User rejected the plan. Stay in plan mode, revise the runtime plan, and call ExitPlanMode again when ready.${feedbackText}`,
 			},
 		],
 		transition: { reason: "plan_rejected" },
 	};
+}
+
+function createEmptyPlan(): RuntimePlan {
+	return { items: [] };
 }

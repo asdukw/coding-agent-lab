@@ -7,10 +7,12 @@ import {
 	type AgentState,
 	continueState,
 	createInitialState,
+	enterPlanMode,
 	resolvePlanApproval,
 } from "../state";
 import { BUILTIN_TOOLS } from "../tools";
 import { toToolSpecs } from "../tools/types";
+import { parseLocalCommand } from "./localCommands";
 import { Markdown } from "./Markdown";
 
 export type AppProps = {
@@ -129,6 +131,28 @@ export function App({ task, cwd, model }: AppProps) {
 			return;
 		}
 
+		const localCommand = parseLocalCommand(value);
+		if (localCommand) {
+			if (localCommand.type === "enter_plan_mode") {
+				const nextState = enterPlanMode(
+					agentState ??
+						createInitialState("/plan", cwd, toToolSpecs(BUILTIN_TOOLS)),
+				);
+				setAgentState(nextState);
+				setHistory((current) => [
+					...current,
+					{
+						id: `local-${current.length + 1}`,
+						user: "/plan",
+						assistant:
+							"Entered plan mode.\n\nThe plan is stored as runtime state only.",
+					},
+				]);
+				setError(undefined);
+			}
+			return;
+		}
+
 		runTurn(value);
 	};
 
@@ -177,7 +201,6 @@ export function App({ task, cwd, model }: AppProps) {
 					paddingX={1}
 				>
 					<Text color="yellow">plan approval</Text>
-					<Text color="gray">{pendingPlanApproval.planFilePath}</Text>
 					<Markdown>{pendingPlanApproval.plan}</Markdown>
 					<Text color="gray">
 						Type "approve" to continue or "reject &lt;feedback&gt;" to revise.

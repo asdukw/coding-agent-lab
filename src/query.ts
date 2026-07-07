@@ -40,7 +40,6 @@ export type QueryEvent =
 	| {
 			type: "plan_approval_request";
 			plan: string;
-			planFilePath: string;
 			state: AgentState;
 	  }
 	| {
@@ -205,7 +204,6 @@ export async function* query({
 				yield {
 					type: "plan_approval_request",
 					plan: pendingPlanApproval.plan,
-					planFilePath: pendingPlanApproval.planFilePath,
 					state,
 				};
 				yield { type: "state", state };

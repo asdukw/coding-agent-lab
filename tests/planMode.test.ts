@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { access, mkdtemp, readFile } from "node:fs/promises";
+import { access, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -15,10 +15,9 @@ import {
 } from "../src/state";
 import { BUILTIN_TOOLS } from "../src/tools";
 import {
-	EDIT_PLAN_TOOL_NAME,
 	ENTER_PLAN_MODE_TOOL_NAME,
 	EXIT_PLAN_MODE_TOOL_NAME,
-	WRITE_PLAN_TOOL_NAME,
+	UPDATE_PLAN_TOOL_NAME,
 } from "../src/tools/planToolNames";
 
 async function makeTempDir(): Promise<string> {
@@ -47,10 +46,13 @@ class PlanModeModelClient implements ModelClient {
 		if (this.callCount === 2) {
 			yield {
 				type: "tool_call",
-				id: "write-plan",
-				name: WRITE_PLAN_TOOL_NAME,
+				id: "update-plan",
+				name: UPDATE_PLAN_TOOL_NAME,
 				arguments: JSON.stringify({
-					content: "# Plan\n\n- Update the TUI\n- Verify with tests",
+					items: [
+						{ step: "Update the TUI", status: "in_progress" },
+						{ step: "Verify with tests", status: "pending" },
+					],
 				}),
 			};
 			return;
@@ -91,24 +93,20 @@ test("plan mode switches tool specs, writes a plan, and pauses for approval", as
 	expect(
 		terminal?.state.toolPermissionContext.pendingPlanApproval?.plan,
 	).toContain("Verify with tests");
-
-	const planPath = terminal?.state.toolPermissionContext.planFilePath;
-	expect(planPath).toBeTruthy();
-	if (!planPath || !terminal) {
+	expect(terminal?.state.plan.items).toHaveLength(2);
+	if (!terminal) {
 		throw new Error("expected plan approval terminal state");
 	}
-	expect(await readFile(planPath, "utf-8")).toContain("Update the TUI");
 
 	const normalToolNames = model.requests[0]?.toolSpecs?.map(
 		(tool) => tool.name,
 	);
 	expect(normalToolNames).toContain(ENTER_PLAN_MODE_TOOL_NAME);
 	expect(normalToolNames).not.toContain(EXIT_PLAN_MODE_TOOL_NAME);
-	expect(normalToolNames).not.toContain(WRITE_PLAN_TOOL_NAME);
+	expect(normalToolNames).not.toContain(UPDATE_PLAN_TOOL_NAME);
 
 	const planToolNames = model.requests[1]?.toolSpecs?.map((tool) => tool.name);
-	expect(planToolNames).toContain(WRITE_PLAN_TOOL_NAME);
-	expect(planToolNames).toContain(EDIT_PLAN_TOOL_NAME);
+	expect(planToolNames).toContain(UPDATE_PLAN_TOOL_NAME);
 	expect(planToolNames).toContain(EXIT_PLAN_MODE_TOOL_NAME);
 	expect(planToolNames).not.toContain("Write");
 	expect(planToolNames).not.toContain("Edit");
@@ -151,7 +149,7 @@ class WriteOutsidePlanModelClient implements ModelClient {
 	}
 }
 
-test("plan mode rejects writes outside the plan file at runtime", async () => {
+test("plan mode rejects local file writes at runtime", async () => {
 	const cwd = await makeTempDir();
 	const forbiddenPath = join(cwd, "src", "feature.ts");
 	const model = new WriteOutsidePlanModelClient(forbiddenPath);
@@ -171,7 +169,7 @@ test("plan mode rejects writes outside the plan file at runtime", async () => {
 	expect(terminal?.reason).toBe("complete");
 	expect(terminal?.state.observations[0]?.ok).toBe(false);
 	expect(terminal?.state.observations[0]?.output).toContain(
-		"Plan mode can only write the plan file",
+		"Plan mode cannot write local files",
 	);
 	await expect(access(forbiddenPath)).rejects.toThrow();
 });

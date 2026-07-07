@@ -1,12 +1,14 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
 import { z } from "zod";
-import { enterPlanMode, requestPlanApproval } from "../state";
+import { formatPlanMarkdown } from "../plan";
 import {
-	EDIT_PLAN_TOOL_NAME,
+	enterPlanMode,
+	requestPlanApproval,
+	updateRuntimePlan,
+} from "../state";
+import {
 	ENTER_PLAN_MODE_TOOL_NAME,
 	EXIT_PLAN_MODE_TOOL_NAME,
-	WRITE_PLAN_TOOL_NAME,
+	UPDATE_PLAN_TOOL_NAME,
 } from "./planToolNames";
 import type { Tool, ToolContext } from "./types";
 
@@ -21,116 +23,96 @@ const noInputSchema = z.object({});
 
 export const enterPlanModeTool: Tool<
 	z.infer<typeof noInputSchema>,
-	{ message: string; planFilePath: string }
+	{ message: string }
 > = {
 	name: ENTER_PLAN_MODE_TOOL_NAME,
 	description:
-		"Enter plan mode to inspect the project and write a plan before implementation",
+		"Enter plan mode to inspect the project and prepare a runtime plan before implementation",
 	inputSchema: noInputSchema,
 	async call(_input, context) {
 		const toolContext = requireContext(context);
 		toolContext.setState((state) => enterPlanMode(state));
-		const state = toolContext.getState();
 
 		return {
 			message:
-				"Entered plan mode. Inspect the project, write the plan file, then call ExitPlanMode for approval.",
-			planFilePath: state.toolPermissionContext.planFilePath,
+				"Entered plan mode. Inspect the project, update the runtime plan, then call ExitPlanMode for approval.",
 		};
 	},
 };
 
-const writePlanInputSchema = z.object({
-	content: z.string().describe("Full markdown plan content"),
+const planItemSchema = z.object({
+	step: z.string().min(1).describe("A concise plan step"),
+	status: z
+		.enum(["pending", "in_progress", "completed"])
+		.describe("Current status for this step"),
 });
 
-export const writePlanTool: Tool<
-	z.infer<typeof writePlanInputSchema>,
-	{ filePath: string; bytesWritten: number }
+const updatePlanInputSchema = z.object({
+	explanation: z
+		.string()
+		.optional()
+		.describe("Optional short explanation for this plan update"),
+	items: z
+		.array(planItemSchema)
+		.min(1)
+		.describe("Ordered plan steps. At most one step can be in_progress."),
+});
+
+export const updatePlanTool: Tool<
+	z.infer<typeof updatePlanInputSchema>,
+	{ plan: string; stepCount: number; message: string }
 > = {
-	name: WRITE_PLAN_TOOL_NAME,
+	name: UPDATE_PLAN_TOOL_NAME,
 	description:
-		"Write or replace the current plan file. This is the only write tool available in plan mode.",
-	inputSchema: writePlanInputSchema,
-	async call({ content }, context) {
+		"Update the runtime plan. Provide the full ordered step list each time; this does not write any local files.",
+	inputSchema: updatePlanInputSchema,
+	async call({ explanation, items }, context) {
 		const toolContext = requireContext(context);
-		const filePath = toolContext.getState().toolPermissionContext.planFilePath;
-		await mkdir(dirname(filePath), { recursive: true });
-		await writeFile(filePath, content, "utf-8");
+		const inProgressCount = items.filter(
+			(item) => item.status === "in_progress",
+		).length;
+		if (inProgressCount > 1) {
+			throw new Error("only one plan step can be in_progress");
+		}
+
+		const runtimePlan = {
+			explanation,
+			items,
+		};
+		const plan = formatPlanMarkdown(runtimePlan);
+		toolContext.setState((state) => updateRuntimePlan(state, runtimePlan));
 
 		return {
-			filePath,
-			bytesWritten: Buffer.byteLength(content, "utf-8"),
+			plan,
+			stepCount: items.length,
+			message: "Runtime plan updated.",
 		};
-	},
-};
-
-const editPlanInputSchema = z.object({
-	old_string: z.string().describe("Exact plan text to find and replace"),
-	new_string: z.string().describe("Text to replace it with"),
-	replace_all: z
-		.boolean()
-		.optional()
-		.describe("Replace every occurrence instead of requiring exactly one"),
-});
-
-export const editPlanTool: Tool<
-	z.infer<typeof editPlanInputSchema>,
-	{ filePath: string; replacements: number }
-> = {
-	name: EDIT_PLAN_TOOL_NAME,
-	description: "Find and replace text in the current plan file",
-	inputSchema: editPlanInputSchema,
-	async call({ old_string, new_string, replace_all }, context) {
-		const toolContext = requireContext(context);
-		const filePath = toolContext.getState().toolPermissionContext.planFilePath;
-		const text = await readFile(filePath, "utf-8");
-		const occurrences = text.split(old_string).length - 1;
-
-		if (occurrences === 0) {
-			throw new Error(`old_string not found in ${filePath}`);
-		}
-		if (!replace_all && occurrences > 1) {
-			throw new Error(
-				`old_string matched ${occurrences} times in ${filePath}; pass replace_all or make old_string unique`,
-			);
-		}
-
-		const replacements = replace_all ? occurrences : 1;
-		const updated = replace_all
-			? text.split(old_string).join(new_string)
-			: text.replace(old_string, new_string);
-
-		await writeFile(filePath, updated, "utf-8");
-		return { filePath, replacements };
 	},
 };
 
 export const exitPlanModeTool: Tool<
 	z.infer<typeof noInputSchema>,
-	{ plan: string; planFilePath: string; message: string }
+	{ plan: string; message: string }
 > = {
 	name: EXIT_PLAN_MODE_TOOL_NAME,
 	description:
-		"Present the current plan for user approval and pause before implementation",
+		"Present the current runtime plan for user approval and pause before implementation",
 	inputSchema: noInputSchema,
 	async call(_input, context) {
 		const toolContext = requireContext(context);
 		const state = toolContext.getState();
-		const planFilePath = state.toolPermissionContext.planFilePath;
-		const plan = await readFile(planFilePath, "utf-8");
+		const plan = formatPlanMarkdown(state.plan);
 
 		if (!plan.trim()) {
-			throw new Error(`plan file is empty: ${planFilePath}`);
+			throw new Error("runtime plan is empty; call UpdatePlan first");
 		}
 
 		toolContext.setState((current) =>
-			requestPlanApproval(current, plan, planFilePath),
+			requestPlanApproval(current, plan, state.plan),
 		);
 
 		return {
 			plan,
-			planFilePath,
 			message: "Plan is ready for user approval.",
 		};
 	},

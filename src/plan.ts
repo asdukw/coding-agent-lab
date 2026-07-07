@@ -1,29 +1,32 @@
-import { resolve } from "node:path";
-import type { AgentState } from "./state";
+import type { AgentState, PlanItemStatus, RuntimePlan } from "./state";
 
-export const PLAN_RELATIVE_PATH = ".cagent/plan.md";
+const PLAN_STATUS_MARKERS: Record<PlanItemStatus, string> = {
+	pending: "[ ]",
+	in_progress: "[~]",
+	completed: "[x]",
+};
 
-export function getPlanFilePath(cwd: string): string {
-	return resolve(cwd, ".cagent", "plan.md");
-}
+export function formatPlanMarkdown(plan: RuntimePlan): string {
+	const lines: string[] = [];
+	const explanation = plan.explanation?.trim();
+	if (explanation) {
+		lines.push(explanation, "");
+	}
 
-export function isPlanFilePath(state: AgentState, filePath: string): boolean {
-	return (
-		normalizePath(resolve(state.cwd, filePath)) ===
-		normalizePath(state.toolPermissionContext.planFilePath)
-	);
+	for (const item of plan.items) {
+		lines.push(`- ${PLAN_STATUS_MARKERS[item.status]} ${item.step}`);
+	}
+
+	return lines.join("\n").trim();
 }
 
 export function getPlanModeReminder(state: AgentState): string {
+	const currentPlan = formatPlanMarkdown(state.plan);
+	const planSection = currentPlan
+		? `\n\nCurrent runtime plan:\n${currentPlan}`
+		: "";
+
 	return `Plan mode is active. Do not modify project files, run non-readonly tools, commit changes, or otherwise change the system.
 
-You may only write or edit the plan file:
-${state.toolPermissionContext.planFilePath}
-
-Use read-only tools to inspect the project. Build the plan incrementally in the plan file. When the plan is ready for approval, call ExitPlanMode.`;
-}
-
-function normalizePath(filePath: string): string {
-	const normalized = resolve(filePath);
-	return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+Use read-only tools to inspect the project. Maintain the plan with UpdatePlan; the plan is runtime state only and is not persisted to local files. When the plan is ready for approval, call ExitPlanMode.${planSection}`;
 }

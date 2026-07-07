@@ -12,7 +12,7 @@ import { StubModelClient } from "../src/model/stub";
 import {
 	ENTER_PLAN_MODE_TOOL_NAME,
 	EXIT_PLAN_MODE_TOOL_NAME,
-	WRITE_PLAN_TOOL_NAME,
+	UPDATE_PLAN_TOOL_NAME,
 } from "../src/tools/planToolNames";
 import { App } from "../src/ui/App";
 
@@ -60,6 +60,37 @@ test("interactive dialog box drives a multi-turn conversation", async () => {
 	unmount();
 });
 
+class FailingModelClient implements ModelClient {
+	readonly name = "failing";
+	called = false;
+
+	stream(_request: ModelRequest): AsyncGenerator<ModelStreamEvent> {
+		this.called = true;
+		throw new Error("model should not be called");
+	}
+}
+
+test("/plan enters plan mode locally without calling the model", async () => {
+	const cwd = await makeTempDir();
+	const model = new FailingModelClient();
+	const { lastFrame, stdin, unmount } = render(<App cwd={cwd} model={model} />);
+
+	await wait(100);
+	stdin.write("/plan");
+	await wait(100);
+	stdin.write("\r");
+	await wait(300);
+
+	const frame = lastFrame() ?? "";
+	expect(frame).toContain("user");
+	expect(frame).toContain("/plan");
+	expect(frame).toContain("Entered plan mode");
+	expect(frame).toContain("runtime state only");
+	expect(model.called).toBe(false);
+
+	unmount();
+});
+
 class PlanApprovalModelClient implements ModelClient {
 	readonly name = "plan-approval";
 	private callCount = 0;
@@ -78,10 +109,10 @@ class PlanApprovalModelClient implements ModelClient {
 		if (this.callCount === 2) {
 			yield {
 				type: "tool_call",
-				id: "write-plan",
-				name: WRITE_PLAN_TOOL_NAME,
+				id: "update-plan",
+				name: UPDATE_PLAN_TOOL_NAME,
 				arguments: JSON.stringify({
-					content: "# Plan\n\n- Update approval UI",
+					items: [{ step: "Update approval UI", status: "pending" }],
 				}),
 			};
 			return;

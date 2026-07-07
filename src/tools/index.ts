@@ -2,10 +2,9 @@ import { editTool } from "./editTool";
 import { globTool } from "./globTool";
 import { grepTool } from "./grepTool";
 import {
-	editPlanTool,
 	enterPlanModeTool,
 	exitPlanModeTool,
-	writePlanTool,
+	updatePlanTool,
 } from "./planTools";
 import { readTool } from "./readTool";
 import type { Tools } from "./types";
@@ -18,19 +17,17 @@ export const BUILTIN_TOOLS: Tools = [
 	globTool,
 	grepTool,
 	enterPlanModeTool,
-	writePlanTool,
-	editPlanTool,
+	updatePlanTool,
 	exitPlanModeTool,
 ];
 
 export {
-	editPlanTool,
 	editTool,
 	enterPlanModeTool,
 	exitPlanModeTool,
 	globTool,
 	grepTool,
 	readTool,
-	writePlanTool,
+	updatePlanTool,
 	writeTool,
 };
