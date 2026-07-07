@@ -3,7 +3,12 @@ import TextInput from "ink-text-input";
 import { useCallback, useEffect, useState } from "react";
 import type { ModelClient } from "../model/client";
 import { query } from "../query";
-import { type AgentState, continueState, createInitialState } from "../state";
+import {
+	type AgentState,
+	continueState,
+	createInitialState,
+	resolvePlanApproval,
+} from "../state";
 import { BUILTIN_TOOLS } from "../tools";
 import { toToolSpecs } from "../tools/types";
 import { Markdown } from "./Markdown";
@@ -29,20 +34,15 @@ export function App({ task, cwd, model }: AppProps) {
 	const [input, setInput] = useState("");
 	const [error, setError] = useState<string | undefined>();
 
-	const runTurn = useCallback(
-		(text: string) => {
-			const trimmed = text.trim();
-			if (!trimmed || status === "running") {
+	const runState = useCallback(
+		(initialState: AgentState, userText: string) => {
+			if (status === "running") {
 				return;
 			}
 
 			setStatus("running");
 			setStreamingText("");
 			setError(undefined);
-
-			const initialState = agentState
-				? continueState(agentState, trimmed)
-				: createInitialState(trimmed, cwd, toToolSpecs(BUILTIN_TOOLS));
 
 			let assistantText = "";
 
@@ -64,7 +64,7 @@ export function App({ task, cwd, model }: AppProps) {
 								...current,
 								{
 									id: String(event.terminal.state.turn),
-									user: trimmed,
+									user: userText,
 									assistant: assistantText,
 								},
 							]);
@@ -78,7 +78,23 @@ export function App({ task, cwd, model }: AppProps) {
 				}
 			})();
 		},
-		[agentState, cwd, model, status],
+		[model, status],
+	);
+
+	const runTurn = useCallback(
+		(text: string) => {
+			const trimmed = text.trim();
+			if (!trimmed || status === "running") {
+				return;
+			}
+
+			const initialState = agentState
+				? continueState(agentState, trimmed)
+				: createInitialState(trimmed, cwd, toToolSpecs(BUILTIN_TOOLS));
+
+			runState(initialState, trimmed);
+		},
+		[agentState, cwd, runState, status],
 	);
 
 	// biome-ignore lint/correctness/useExhaustiveDependencies: intentionally runs once on mount, not on every task/runTurn change
@@ -90,8 +106,34 @@ export function App({ task, cwd, model }: AppProps) {
 
 	const handleSubmit = (value: string) => {
 		setInput("");
+		const approval = parsePlanApprovalInput(value);
+		if (agentState?.toolPermissionContext.pendingPlanApproval) {
+			if (!approval) {
+				setError(
+					'Type "approve" to continue or "reject <feedback>" to revise.',
+				);
+				return;
+			}
+
+			const nextState = resolvePlanApproval(
+				agentState,
+				approval.decision,
+				approval.feedback,
+			);
+			runState(
+				nextState,
+				approval.decision === "approve"
+					? "approve plan"
+					: `reject plan${approval.feedback ? `: ${approval.feedback}` : ""}`,
+			);
+			return;
+		}
+
 		runTurn(value);
 	};
+
+	const pendingPlanApproval =
+		agentState?.toolPermissionContext.pendingPlanApproval;
 
 	return (
 		<Box flexDirection="column" gap={1}>
@@ -127,6 +169,22 @@ export function App({ task, cwd, model }: AppProps) {
 
 			{error ? <Text color="red">error: {error}</Text> : null}
 
+			{pendingPlanApproval ? (
+				<Box
+					borderStyle="round"
+					borderColor="yellow"
+					flexDirection="column"
+					paddingX={1}
+				>
+					<Text color="yellow">plan approval</Text>
+					<Text color="gray">{pendingPlanApproval.planFilePath}</Text>
+					<Markdown>{pendingPlanApproval.plan}</Markdown>
+					<Text color="gray">
+						Type "approve" to continue or "reject &lt;feedback&gt;" to revise.
+					</Text>
+				</Box>
+			) : null}
+
 			{status === "idle" ? (
 				<Box borderStyle="round" borderColor="cyan" paddingX={1}>
 					<Text color="green">{"> "}</Text>
@@ -134,10 +192,41 @@ export function App({ task, cwd, model }: AppProps) {
 						value={input}
 						onChange={setInput}
 						onSubmit={handleSubmit}
-						placeholder="Type a message and press Enter..."
+						placeholder={
+							pendingPlanApproval
+								? "approve or reject with feedback..."
+								: "Type a message and press Enter..."
+						}
 					/>
 				</Box>
 			) : null}
 		</Box>
 	);
+}
+
+function parsePlanApprovalInput(
+	value: string,
+): { decision: "approve" | "reject"; feedback: string } | undefined {
+	const trimmed = value.trim();
+	const lower = trimmed.toLowerCase();
+
+	if (["approve", "approved", "yes", "y"].includes(lower)) {
+		return { decision: "approve", feedback: "" };
+	}
+
+	if (lower === "reject" || lower.startsWith("reject ")) {
+		return {
+			decision: "reject",
+			feedback: trimmed.slice("reject".length).trim(),
+		};
+	}
+
+	if (lower === "no" || lower.startsWith("no ")) {
+		return {
+			decision: "reject",
+			feedback: trimmed.slice("no".length).trim(),
+		};
+	}
+
+	return undefined;
 }

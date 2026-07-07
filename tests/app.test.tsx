@@ -1,9 +1,26 @@
 import { expect, test } from "bun:test";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { render } from "ink-testing-library";
+import type {
+	ModelClient,
+	ModelRequest,
+	ModelStreamEvent,
+} from "../src/model/client";
 import { StubModelClient } from "../src/model/stub";
+import {
+	ENTER_PLAN_MODE_TOOL_NAME,
+	EXIT_PLAN_MODE_TOOL_NAME,
+	WRITE_PLAN_TOOL_NAME,
+} from "../src/tools/planToolNames";
 import { App } from "../src/ui/App";
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function makeTempDir(): Promise<string> {
+	return mkdtemp(join(tmpdir(), "cagent-app-"));
+}
 
 test("interactive dialog box drives a multi-turn conversation", async () => {
 	const model = new StubModelClient();
@@ -39,6 +56,74 @@ test("interactive dialog box drives a multi-turn conversation", async () => {
 	expect(frame).toContain("Stub agent received task: hello there");
 	expect(frame).toContain("second message");
 	expect(frame).toContain("Stub agent received task: second message");
+
+	unmount();
+});
+
+class PlanApprovalModelClient implements ModelClient {
+	readonly name = "plan-approval";
+	private callCount = 0;
+
+	async *stream(_request: ModelRequest): AsyncGenerator<ModelStreamEvent> {
+		this.callCount++;
+		if (this.callCount === 1) {
+			yield {
+				type: "tool_call",
+				id: "enter",
+				name: ENTER_PLAN_MODE_TOOL_NAME,
+				arguments: "{}",
+			};
+			return;
+		}
+		if (this.callCount === 2) {
+			yield {
+				type: "tool_call",
+				id: "write-plan",
+				name: WRITE_PLAN_TOOL_NAME,
+				arguments: JSON.stringify({
+					content: "# Plan\n\n- Update approval UI",
+				}),
+			};
+			return;
+		}
+		if (this.callCount === 3) {
+			yield {
+				type: "tool_call",
+				id: "exit",
+				name: EXIT_PLAN_MODE_TOOL_NAME,
+				arguments: "{}",
+			};
+			return;
+		}
+
+		yield { type: "text_delta", content: "implementation started" };
+	}
+}
+
+test("plan approval prompt continues after approve", async () => {
+	const cwd = await makeTempDir();
+	const model = new PlanApprovalModelClient();
+	const { lastFrame, stdin, unmount } = render(<App cwd={cwd} model={model} />);
+
+	await wait(100);
+	stdin.write("plan this change");
+	await wait(100);
+	stdin.write("\r");
+	await wait(500);
+
+	let frame = lastFrame() ?? "";
+	expect(frame).toContain("plan approval");
+	expect(frame).toContain("Update approval UI");
+	expect(frame).toContain("approve or reject");
+
+	stdin.write("approve");
+	await wait(100);
+	stdin.write("\r");
+	await wait(500);
+
+	frame = lastFrame() ?? "";
+	expect(frame).toContain("approve plan");
+	expect(frame).toContain("implementation started");
 
 	unmount();
 });

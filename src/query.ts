@@ -1,5 +1,12 @@
 import type { ModelClient } from "./model/client";
-import type { AgentState, Message } from "./state";
+import { getPlanModeReminder } from "./plan";
+import {
+	type AgentState,
+	ensureToolPermissionContext,
+	type Message,
+} from "./state";
+import { authorizeToolCall, getToolsForMode } from "./tools/permissions";
+import { EXIT_PLAN_MODE_TOOL_NAME } from "./tools/planToolNames";
 import { type Tools, toToolSpecs } from "./tools/types";
 
 export type QueryParams = {
@@ -9,7 +16,7 @@ export type QueryParams = {
 };
 
 export type Terminal = {
-	reason: "complete" | "max_turns" | "model_error";
+	reason: "complete" | "max_turns" | "model_error" | "plan_approval";
 	state: AgentState;
 };
 
@@ -31,6 +38,12 @@ export type QueryEvent =
 			state: AgentState;
 	  }
 	| {
+			type: "plan_approval_request";
+			plan: string;
+			planFilePath: string;
+			state: AgentState;
+	  }
+	| {
 			type: "terminal";
 			terminal: Terminal;
 	  };
@@ -42,11 +55,10 @@ export async function* query({
 }: QueryParams): AsyncGenerator<QueryEvent, Terminal> {
 	const runtimeTools = tools ?? [];
 	let state: AgentState = {
-		...initialState,
-		toolSpecs:
-			initialState.toolSpecs.length > 0
-				? initialState.toolSpecs
-				: toToolSpecs(runtimeTools),
+		...ensureToolPermissionContext(initialState),
+		toolSpecs: toToolSpecs(
+			getToolsForMode(ensureToolPermissionContext(initialState), runtimeTools),
+		),
 		todos: [
 			{
 				id: "1",
@@ -75,6 +87,11 @@ export async function* query({
 			},
 			transition: { reason: "next_turn" },
 		};
+		const activeTools = getToolsForMode(state, runtimeTools);
+		state = {
+			...state,
+			toolSpecs: toToolSpecs(activeTools),
+		};
 
 		yield {
 			type: "request_start",
@@ -85,7 +102,7 @@ export async function* query({
 		const toolCalls: { id: string; name: string; arguments: string }[] = [];
 
 		for await (const event of model.stream({
-			messages: state.messages,
+			messages: buildModelMessages(state),
 			toolSpecs: state.toolSpecs,
 		})) {
 			if (event.type === "text_delta") {
@@ -156,7 +173,13 @@ export async function* query({
 					string,
 					unknown
 				>;
-				const output = await tool.call(args);
+				authorizeToolCall(state, tool, args);
+				const output = await tool.call(args, {
+					getState: () => state,
+					setState(next) {
+						state = typeof next === "function" ? next(state) : next;
+					},
+				});
 				resultContent = JSON.stringify(output);
 			} catch (caught) {
 				ok = false;
@@ -175,6 +198,39 @@ export async function* query({
 					{ role: "tool", content: resultContent, toolCallId: call.id },
 				],
 			};
+
+			const pendingPlanApproval =
+				state.toolPermissionContext.pendingPlanApproval;
+			if (ok && call.name === EXIT_PLAN_MODE_TOOL_NAME && pendingPlanApproval) {
+				yield {
+					type: "plan_approval_request",
+					plan: pendingPlanApproval.plan,
+					planFilePath: pendingPlanApproval.planFilePath,
+					state,
+				};
+				yield { type: "state", state };
+
+				const terminal: Terminal = {
+					reason: "plan_approval",
+					state,
+				};
+				yield {
+					type: "terminal",
+					terminal,
+				};
+				return terminal;
+			}
 		}
 	}
+}
+
+function buildModelMessages(state: AgentState): Message[] {
+	if (state.toolPermissionContext.mode !== "plan") {
+		return state.messages;
+	}
+
+	return [
+		{ role: "system", content: getPlanModeReminder(state) },
+		...state.messages,
+	];
 }

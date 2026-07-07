@@ -1,3 +1,4 @@
+import { getPlanFilePath } from "./plan";
 import type { ToolSpec } from "./tools/types";
 
 export type Role = "user" | "assistant" | "tool" | "system";
@@ -35,18 +36,36 @@ export type BudgetState = {
 	maxTurns: number;
 };
 
+export type AgentMode = "normal" | "plan";
+
+export type PendingPlanApproval = {
+	plan: string;
+	planFilePath: string;
+};
+
+export type ToolPermissionContext = {
+	mode: AgentMode;
+	prePlanMode?: AgentMode;
+	planFilePath: string;
+	pendingPlanApproval?: PendingPlanApproval;
+};
+
 export type TransitionReason =
 	| "start"
 	| "next_turn"
 	| "tool_error"
 	| "max_turns"
 	| "complete"
+	| "plan_approval"
+	| "plan_approved"
+	| "plan_rejected"
 	| "permission_denied";
 
 export type AgentState = {
 	task: string;
 	cwd: string;
 	toolSpecs: ToolSpec[];
+	toolPermissionContext: ToolPermissionContext;
 	messages: Message[];
 	todos: TodoItem[];
 	observations: Observation[];
@@ -70,6 +89,7 @@ export function createInitialState(
 		task,
 		cwd,
 		toolSpecs: tools,
+		toolPermissionContext: createToolPermissionContext(cwd),
 		messages: [{ role: "user", content: task }],
 		todos: [],
 		observations: [],
@@ -86,8 +106,125 @@ export function createInitialState(
 
 export function continueState(prev: AgentState, task: string): AgentState {
 	return {
-		...prev,
+		...ensureToolPermissionContext(prev),
 		task,
 		messages: [...prev.messages, { role: "user", content: task }],
+	};
+}
+
+export function createToolPermissionContext(
+	cwd: string,
+): ToolPermissionContext {
+	return {
+		mode: "normal",
+		planFilePath: getPlanFilePath(cwd),
+	};
+}
+
+export function ensureToolPermissionContext(state: AgentState): AgentState {
+	if (state.toolPermissionContext?.planFilePath) {
+		return state;
+	}
+
+	return {
+		...state,
+		toolPermissionContext: createToolPermissionContext(state.cwd),
+	};
+}
+
+export function enterPlanMode(prev: AgentState): AgentState {
+	const state = ensureToolPermissionContext(prev);
+	const current = state.toolPermissionContext;
+
+	if (current.mode === "plan") {
+		return {
+			...state,
+			toolPermissionContext: {
+				...current,
+				pendingPlanApproval: undefined,
+			},
+		};
+	}
+
+	return {
+		...state,
+		toolPermissionContext: {
+			...current,
+			mode: "plan",
+			prePlanMode: current.mode,
+			pendingPlanApproval: undefined,
+		},
+	};
+}
+
+export function requestPlanApproval(
+	prev: AgentState,
+	plan: string,
+	planFilePath: string,
+): AgentState {
+	const state = ensureToolPermissionContext(prev);
+
+	return {
+		...state,
+		toolPermissionContext: {
+			...state.toolPermissionContext,
+			pendingPlanApproval: { plan, planFilePath },
+		},
+		transition: { reason: "plan_approval" },
+	};
+}
+
+export function resolvePlanApproval(
+	prev: AgentState,
+	decision: "approve" | "reject",
+	feedback = "",
+): AgentState {
+	const state = ensureToolPermissionContext(prev);
+	const pending = state.toolPermissionContext.pendingPlanApproval;
+	if (!pending) {
+		return state;
+	}
+
+	if (decision === "approve") {
+		const restoreMode = state.toolPermissionContext.prePlanMode ?? "normal";
+		return {
+			...state,
+			task: "Implement the approved plan",
+			toolPermissionContext: {
+				...state.toolPermissionContext,
+				mode: restoreMode,
+				prePlanMode: undefined,
+				pendingPlanApproval: undefined,
+			},
+			messages: [
+				...state.messages,
+				{
+					role: "user",
+					content: `User approved the plan. You can now implement it.\n\nApproved plan:\n\n${pending.plan}`,
+				},
+			],
+			transition: { reason: "plan_approved" },
+		};
+	}
+
+	const feedbackText = feedback.trim()
+		? `\n\nUser feedback: ${feedback.trim()}`
+		: "";
+	return {
+		...state,
+		task: "Revise the plan",
+		toolPermissionContext: {
+			...state.toolPermissionContext,
+			mode: "plan",
+			pendingPlanApproval: undefined,
+		},
+		messages: [
+			...state.messages,
+			{
+				role: "user",
+				content: `User rejected the plan. Stay in plan mode, revise the plan file, and call ExitPlanMode again when ready.${feedbackText}`,
+			},
+		],
+		transition: { reason: "plan_rejected" },
 	};
 }
