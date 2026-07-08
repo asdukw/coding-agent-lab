@@ -23,6 +23,7 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 # caches
 .eslintcache
 .cache/
+.cagent/
 *.tsbuildinfo
 
 # editors / OS

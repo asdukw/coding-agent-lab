@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { ToolSpec } from "./tools/types";
 
 export type Role = "user" | "assistant" | "tool" | "system";
@@ -72,6 +73,7 @@ export type TransitionReason =
 	| "permission_denied";
 
 export type AgentState = {
+	sessionId: string;
 	task: string;
 	cwd: string;
 	toolSpecs: ToolSpec[];
@@ -91,12 +93,18 @@ export type AgentState = {
 	};
 };
 
+export function createSessionId(): string {
+	return randomUUID();
+}
+
 export function createInitialState(
 	task: string,
 	cwd: string,
 	tools: ToolSpec[] = [],
+	sessionId = createSessionId(),
 ): AgentState {
 	return {
+		sessionId,
 		task,
 		cwd,
 		toolSpecs: tools,

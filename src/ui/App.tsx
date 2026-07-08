@@ -3,6 +3,7 @@ import TextInput from "ink-text-input";
 import { useCallback, useEffect, useState } from "react";
 import type { ModelClient } from "../model/client";
 import { query } from "../query";
+import { loadSession, saveSession } from "../sessionStore";
 import {
 	type AgentState,
 	continueState,
@@ -19,6 +20,7 @@ export type AppProps = {
 	task?: string;
 	cwd: string;
 	model: ModelClient;
+	initialState?: AgentState;
 };
 
 type Turn = {
@@ -27,10 +29,48 @@ type Turn = {
 	assistant: string;
 };
 
-export function App({ task, cwd, model }: AppProps) {
+function historyFromState(state: AgentState | undefined): Turn[] {
+	if (!state) {
+		return [];
+	}
+
+	const turns: Turn[] = [];
+	let pendingUser: string | undefined;
+	let id = 0;
+
+	for (const message of state.messages) {
+		if (message.role === "user") {
+			pendingUser = message.content;
+		} else if (
+			message.role === "assistant" &&
+			pendingUser !== undefined &&
+			message.content.trim()
+		) {
+			turns.push({
+				id: `${state.sessionId}:${id++}`,
+				user: pendingUser,
+				assistant: message.content,
+			});
+			pendingUser = undefined;
+		}
+	}
+
+	return turns;
+}
+
+export function App({
+	task,
+	cwd,
+	model,
+	initialState: restoredState,
+}: AppProps) {
 	const [modelName, setModelName] = useState<string | undefined>();
-	const [agentState, setAgentState] = useState<AgentState | undefined>();
-	const [history, setHistory] = useState<Turn[]>([]);
+	const [agentState, setAgentState] = useState<AgentState | undefined>(
+		restoredState,
+	);
+	const [history, setHistory] = useState<Turn[]>(
+		historyFromState(restoredState),
+	);
 	const [streamingText, setStreamingText] = useState("");
 	const [status, setStatus] = useState<"idle" | "running">("idle");
 	const [input, setInput] = useState("");
@@ -61,11 +101,12 @@ export function App({ task, cwd, model }: AppProps) {
 							assistantText += event.content;
 							setStreamingText(assistantText);
 						} else if (event.type === "terminal") {
+							await saveSession(cwd, event.terminal.state);
 							setAgentState(event.terminal.state);
 							setHistory((current) => [
 								...current,
 								{
-									id: String(event.terminal.state.turn),
+									id: `${event.terminal.state.sessionId}:${event.terminal.state.turn}`,
 									user: userText,
 									assistant: assistantText,
 								},
@@ -80,7 +121,7 @@ export function App({ task, cwd, model }: AppProps) {
 				}
 			})();
 		},
-		[model, status],
+		[cwd, model, status],
 	);
 
 	const runTurn = useCallback(
@@ -133,6 +174,31 @@ export function App({ task, cwd, model }: AppProps) {
 
 		const localCommand = parseLocalCommand(value);
 		if (localCommand) {
+			if (localCommand.type === "invalid") {
+				setError(localCommand.message);
+				return;
+			}
+
+			if (localCommand.type === "unknown") {
+				setError(`unknown command: ${localCommand.name}`);
+				return;
+			}
+
+			if (localCommand.type === "resume") {
+				setError(undefined);
+				setStreamingText("");
+				void (async () => {
+					try {
+						const restored = await loadSession(cwd, localCommand.sessionId);
+						setAgentState(restored);
+						setHistory(historyFromState(restored));
+					} catch (caught) {
+						setError(caught instanceof Error ? caught.message : String(caught));
+					}
+				})();
+				return;
+			}
+
 			if (localCommand.type === "enter_plan_mode") {
 				const nextState = enterPlanMode(
 					agentState ??
@@ -164,6 +230,9 @@ export function App({ task, cwd, model }: AppProps) {
 			<Box flexDirection="column">
 				<Text color="cyan">cagent</Text>
 				<Text color="gray">cwd: {cwd}</Text>
+				{agentState ? (
+					<Text color="gray">session: {agentState.sessionId}</Text>
+				) : null}
 				{modelName ? <Text color="gray">model: {modelName}</Text> : null}
 			</Box>
 
