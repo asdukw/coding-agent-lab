@@ -157,6 +157,10 @@ export async function* query({
 			toolCalls,
 		};
 		state = { ...state, messages: [...state.messages, assistantMessage] };
+		yield {
+			type: "message",
+			message: assistantMessage,
+		};
 
 		for (const call of toolCalls) {
 			let ok = true;
@@ -185,6 +189,11 @@ export async function* query({
 				resultContent = `error: ${caught instanceof Error ? caught.message : String(caught)}`;
 			}
 
+			const toolMessage: Message = {
+				role: "tool",
+				content: resultContent,
+				toolCallId: call.id,
+			};
 			state = {
 				...state,
 				lastToolCall: { name: call.name, args },
@@ -192,10 +201,11 @@ export async function* query({
 					...state.observations,
 					{ tool: call.name, args, ok, output: resultContent },
 				],
-				messages: [
-					...state.messages,
-					{ role: "tool", content: resultContent, toolCallId: call.id },
-				],
+				messages: [...state.messages, toolMessage],
+			};
+			yield {
+				type: "message",
+				message: toolMessage,
 			};
 
 			const pendingPlanApproval =

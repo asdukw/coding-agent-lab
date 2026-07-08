@@ -3,7 +3,12 @@ import TextInput from "ink-text-input";
 import { useCallback, useEffect, useState } from "react";
 import type { ModelClient } from "../model/client";
 import { query } from "../query";
-import { loadSession, saveSession } from "../sessionStore";
+import {
+	appendSessionMessage,
+	appendSessionState,
+	ensureSessionStarted,
+	loadSession,
+} from "../sessionStore";
 import {
 	type AgentState,
 	continueState,
@@ -77,7 +82,11 @@ export function App({
 	const [error, setError] = useState<string | undefined>();
 
 	const runState = useCallback(
-		(initialState: AgentState, userText: string) => {
+		(
+			initialState: AgentState,
+			userText: string,
+			persistFromMessageIndex: number,
+		) => {
 			if (status === "running") {
 				return;
 			}
@@ -90,6 +99,14 @@ export function App({
 
 			void (async () => {
 				try {
+					await ensureSessionStarted(cwd, initialState);
+					for (const message of initialState.messages.slice(
+						persistFromMessageIndex,
+					)) {
+						await appendSessionMessage(cwd, initialState, message);
+					}
+
+					let statePersisted = false;
 					for await (const event of query({
 						initialState,
 						model,
@@ -100,8 +117,15 @@ export function App({
 						} else if (event.type === "stream_delta") {
 							assistantText += event.content;
 							setStreamingText(assistantText);
+						} else if (event.type === "message") {
+							await appendSessionMessage(cwd, initialState, event.message);
+						} else if (event.type === "state") {
+							await appendSessionState(cwd, event.state);
+							statePersisted = true;
 						} else if (event.type === "terminal") {
-							await saveSession(cwd, event.terminal.state);
+							if (!statePersisted) {
+								await appendSessionState(cwd, event.terminal.state);
+							}
 							setAgentState(event.terminal.state);
 							setHistory((current) => [
 								...current,
@@ -135,7 +159,7 @@ export function App({
 				? continueState(agentState, trimmed)
 				: createInitialState(trimmed, cwd, toToolSpecs(BUILTIN_TOOLS));
 
-			runState(initialState, trimmed);
+			runState(initialState, trimmed, agentState?.messages.length ?? 0);
 		},
 		[agentState, cwd, runState, status],
 	);
@@ -168,6 +192,7 @@ export function App({
 				approval.decision === "approve"
 					? "approve plan"
 					: `reject plan${approval.feedback ? `: ${approval.feedback}` : ""}`,
+				agentState.messages.length,
 			);
 			return;
 		}
