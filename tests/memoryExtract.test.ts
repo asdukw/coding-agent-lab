@@ -1,0 +1,87 @@
+import { expect, test } from "bun:test";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { getMemoryDir } from "../src/memory";
+import { runMemoryExtractionSubAgent } from "../src/memoryExtract";
+import type {
+	ModelClient,
+	ModelRequest,
+	ModelStreamEvent,
+} from "../src/model/client";
+import { createInitialState } from "../src/state";
+
+async function makeTempDir(): Promise<string> {
+	return mkdtemp(join(tmpdir(), "cagent-memory-extract-"));
+}
+
+class MemoryWritingModelClient implements ModelClient {
+	readonly name = "memory-writer";
+	private callCount = 0;
+
+	constructor(private readonly cwd: string) {}
+
+	async *stream(request: ModelRequest): AsyncGenerator<ModelStreamEvent> {
+		this.callCount++;
+		if (this.callCount === 1) {
+			expect(request.toolSpecs?.map((tool) => tool.name)).toContain("Write");
+			yield {
+				type: "tool_call",
+				id: "write-memory",
+				name: "Write",
+				arguments: JSON.stringify({
+					file_path: join(getMemoryDir(this.cwd), "preferences.md"),
+					content: [
+						"---",
+						"type: feedback",
+						"description: User prefers concise answers",
+						"created_at: 2026-07-09T00:00:00.000Z",
+						"updated_at: 2026-07-09T00:00:00.000Z",
+						"source: user",
+						"confidence: high",
+						"stability: evolving",
+						"---",
+						"",
+						"Keep answers concise.",
+					].join("\n"),
+				}),
+			};
+			return;
+		}
+
+		yield { type: "text_delta", content: "saved preferences.md" };
+	}
+}
+
+test("memory extraction sub agent can write memory files", async () => {
+	const cwd = await makeTempDir();
+	try {
+		const state = {
+			...createInitialState("please remember I like concise answers", cwd),
+			sessionId: "main-session",
+			turn: 1,
+			messages: [
+				{
+					role: "user" as const,
+					content: "please remember I like concise answers",
+				},
+				{ role: "assistant" as const, content: "I'll keep that in mind." },
+			],
+		};
+		const result = await runMemoryExtractionSubAgent({
+			state,
+			model: new MemoryWritingModelClient(cwd),
+		});
+
+		expect(result).toEqual({
+			subAgentSessionId: "main-session.memory.1",
+			ok: true,
+			summary: "saved preferences.md",
+		});
+		expect(
+			await readFile(join(getMemoryDir(cwd), "preferences.md"), "utf8"),
+		).toContain("Keep answers concise.");
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});

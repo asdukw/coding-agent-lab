@@ -22,6 +22,7 @@ export type QueryParams = {
 	initialState: AgentState;
 	model: ModelClient;
 	tools?: Tools;
+	enableMemoryExtraction?: boolean;
 };
 
 export type Terminal = {
@@ -52,6 +53,10 @@ export type QueryEvent =
 			state: AgentState;
 	  }
 	| {
+			type: "memory_extraction_request";
+			state: AgentState;
+	  }
+	| {
 			type: "terminal";
 			terminal: Terminal;
 	  };
@@ -60,6 +65,7 @@ export async function* query({
 	initialState,
 	model,
 	tools,
+	enableMemoryExtraction = true,
 }: QueryParams): AsyncGenerator<QueryEvent, Terminal> {
 	const runtimeTools = tools ?? [];
 	let state: AgentState = {
@@ -75,6 +81,7 @@ export async function* query({
 			},
 		],
 	};
+	let queryHadToolCalls = false;
 
 	for (;;) {
 		// budget.turnsUsed/budget.maxTurns is the source of truth for the turn
@@ -147,6 +154,17 @@ export async function* query({
 				state,
 			};
 
+			if (
+				enableMemoryExtraction &&
+				!queryHadToolCalls &&
+				shouldRequestMemoryExtraction(state)
+			) {
+				yield {
+					type: "memory_extraction_request",
+					state,
+				};
+			}
+
 			const terminal: Terminal = {
 				reason: "complete",
 				state,
@@ -160,6 +178,7 @@ export async function* query({
 			return terminal;
 		}
 
+		queryHadToolCalls = true;
 		const assistantMessage: Message = {
 			role: "assistant",
 			content: roundText,
@@ -308,6 +327,44 @@ function latestUserInput(state: AgentState): string {
 		}
 	}
 	return "";
+}
+
+function shouldRequestMemoryExtraction(state: AgentState): boolean {
+	if (state.toolPermissionContext.mode !== "normal") {
+		return false;
+	}
+
+	let hasAssistant = false;
+	let userText = "";
+	for (let i = state.messages.length - 1; i >= 0; i--) {
+		const message = state.messages[i];
+		if (!message) {
+			continue;
+		}
+		if (
+			!hasAssistant &&
+			message.role === "assistant" &&
+			message.content.trim()
+		) {
+			hasAssistant = true;
+			continue;
+		}
+		if (hasAssistant && message.role === "user") {
+			userText = message.content.toLowerCase();
+			break;
+		}
+	}
+
+	if (!hasAssistant || !userText) {
+		return false;
+	}
+
+	return !(
+		userText.includes("don't remember") ||
+		userText.includes("do not remember") ||
+		userText.includes("不要记") ||
+		userText.includes("别记")
+	);
 }
 
 async function collectTextFromModel(

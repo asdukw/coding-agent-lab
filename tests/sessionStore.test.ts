@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseCliArgs } from "../src/main";
 import {
+	appendSessionMemoryExtraction,
 	appendSessionMessage,
 	appendSessionState,
 	ensureSessionStarted,
@@ -104,6 +105,35 @@ test("append APIs persist messages immediately and update the session index", as
 		const restored = await loadSession(cwd, "append-1");
 		expect(restored.messages).toEqual(nextState.messages);
 		expect(restored.turn).toBe(1);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("appendSessionMemoryExtraction records a lightweight background event", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "cagent-session-"));
+	try {
+		const state = createInitialState("hello", cwd, [], "memory-event-1");
+		await appendSessionMemoryExtraction(cwd, state, {
+			subAgentSessionId: "memory-event-1.memory.0",
+			ok: true,
+			summary: "NO_MEMORY",
+		});
+
+		const raw = await readFile(getSessionPath(cwd, "memory-event-1"), "utf8");
+		const events = raw
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line) as { type: string; summary?: string });
+
+		expect(events.map((event) => event.type)).toEqual([
+			"session_start",
+			"memory_extraction",
+		]);
+		expect(events[1]?.summary).toBe("NO_MEMORY");
+
+		const restored = await loadSession(cwd, "memory-event-1");
+		expect(restored.messages).toEqual([]);
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}

@@ -63,6 +63,14 @@ export type SessionEvent =
 			turn: number;
 			budget: BudgetState;
 			savedAt: string;
+	  }
+	| {
+			type: "memory_extraction";
+			sessionId: string;
+			subAgentSessionId: string;
+			ok: boolean;
+			summary: string;
+			createdAt: string;
 	  };
 
 export type SessionIndexEntry = {
@@ -133,6 +141,26 @@ export async function appendSessionState(
 		savedAt: new Date().toISOString(),
 	});
 	await appendSessionIndex(cwd, state);
+}
+
+export async function appendSessionMemoryExtraction(
+	cwd: string,
+	state: AgentState,
+	result: {
+		subAgentSessionId: string;
+		ok: boolean;
+		summary: string;
+	},
+): Promise<void> {
+	await ensureSessionStarted(cwd, state);
+	await appendSessionEvent(cwd, {
+		type: "memory_extraction",
+		sessionId: state.sessionId,
+		subAgentSessionId: result.subAgentSessionId,
+		ok: result.ok,
+		summary: result.summary,
+		createdAt: new Date().toISOString(),
+	});
 }
 
 export async function saveSession(

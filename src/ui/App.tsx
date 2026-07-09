@@ -2,9 +2,11 @@ import { Box, Text } from "ink";
 import TextInput from "ink-text-input";
 import { useCallback, useEffect, useState } from "react";
 import { ensureMemoryStore, formatMemoryStoreSummary } from "../memory";
+import { runMemoryExtractionSubAgent } from "../memoryExtract";
 import type { ModelClient } from "../model/client";
 import { query } from "../query";
 import {
+	appendSessionMemoryExtraction,
 	appendSessionMessage,
 	appendSessionState,
 	ensureSessionStarted,
@@ -123,6 +125,15 @@ export function App({
 						} else if (event.type === "state") {
 							await appendSessionState(cwd, event.state);
 							statePersisted = true;
+						} else if (event.type === "memory_extraction_request") {
+							void runMemoryExtractionSubAgent({
+								state: event.state,
+								model,
+							})
+								.then((result) =>
+									appendSessionMemoryExtraction(cwd, event.state, result),
+								)
+								.catch(() => undefined);
 						} else if (event.type === "terminal") {
 							if (!statePersisted) {
 								await appendSessionState(cwd, event.terminal.state);

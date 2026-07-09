@@ -276,3 +276,36 @@ test("query uses a side query to inject relevant memory topic files", async () =
 		await rm(cwd, { recursive: true, force: true });
 	}
 });
+
+test("query emits a memory extraction request after a tool-free complete turn", async () => {
+	const cwd = await makeTempDir();
+	try {
+		const model = new RecordingModelClient();
+		const initialState = createInitialState(
+			"remember I prefer short answers",
+			cwd,
+		);
+		const events: string[] = [];
+
+		for await (const event of query({ initialState, model, tools: [] })) {
+			events.push(event.type);
+		}
+
+		expect(events).toContain("memory_extraction_request");
+		expect(events.at(-1)).toBe("terminal");
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("query skips memory extraction request after tool use", async () => {
+	const model = new FakeToolCallingModelClient();
+	const initialState = createInitialState("add 2 and 3", "/repo");
+	const events: string[] = [];
+
+	for await (const event of query({ initialState, model, tools: [addTool] })) {
+		events.push(event.type);
+	}
+
+	expect(events).not.toContain("memory_extraction_request");
+});
