@@ -1,6 +1,7 @@
 import { Box, Text } from "ink";
 import TextInput from "ink-text-input";
 import { useCallback, useEffect, useState } from "react";
+import { ensureMemoryStore, formatMemoryStoreSummary } from "../memory";
 import type { ModelClient } from "../model/client";
 import { query } from "../query";
 import {
@@ -217,6 +218,27 @@ export function App({
 						const restored = await loadSession(cwd, localCommand.sessionId);
 						setAgentState(restored);
 						setHistory(historyFromState(restored));
+					} catch (caught) {
+						setError(caught instanceof Error ? caught.message : String(caught));
+					}
+				})();
+				return;
+			}
+
+			if (localCommand.type === "memory") {
+				setError(undefined);
+				setStreamingText("");
+				void (async () => {
+					try {
+						const info = await ensureMemoryStore(cwd);
+						setHistory((current) => [
+							...current,
+							{
+								id: `local-${current.length + 1}`,
+								user: "/memory",
+								assistant: formatMemoryStoreSummary(info),
+							},
+						]);
 					} catch (caught) {
 						setError(caught instanceof Error ? caught.message : String(caught));
 					}

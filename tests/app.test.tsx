@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { render } from "ink-testing-library";
@@ -128,6 +128,33 @@ test("/plan enters plan mode locally without calling the model", async () => {
 		expect(frame).toContain("Entered plan mode");
 		expect(frame).toContain("runtime state only");
 		expect(model.called).toBe(false);
+	} finally {
+		unmount();
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("/memory initializes the memory store locally without calling the model", async () => {
+	const cwd = await makeTempDir();
+	const model = new FailingModelClient();
+	const { lastFrame, stdin, unmount } = render(<App cwd={cwd} model={model} />);
+
+	try {
+		await wait(100);
+		stdin.write("/memory");
+		await wait(100);
+		stdin.write("\r");
+		await wait(300);
+
+		const frame = lastFrame() ?? "";
+		expect(frame).toContain("user");
+		expect(frame).toContain("/memory");
+		expect(frame).toContain("Memory store is ready");
+		expect(frame).toContain("MEMORY.md");
+		expect(model.called).toBe(false);
+		expect(
+			await readFile(join(cwd, ".cagent", "memory", "MEMORY.md"), "utf-8"),
+		).toBe("# Memory\n\n");
 	} finally {
 		unmount();
 		await rm(cwd, { recursive: true, force: true });

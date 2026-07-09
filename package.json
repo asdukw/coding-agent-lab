@@ -9,7 +9,7 @@
 		"start": "bun run src/main.tsx",
 		"dev": "bun --watch src/main.tsx",
 		"check": "tsc --noEmit",
-		"test": "bun test tests/app.test.tsx tests/localCommands.test.ts tests/deepseekConnectivity.test.ts tests/query.tool.test.ts tests/sessionStore.test.ts tests/tools.test.ts",
+		"test": "bun test tests/app.test.tsx tests/localCommands.test.ts tests/memory.test.ts tests/deepseekConnectivity.test.ts tests/query.tool.test.ts tests/sessionStore.test.ts tests/tools.test.ts",
 		"test:deepseek": "bun test tests/deepseekConnectivity.test.ts",
 		"lint": "biome check src tests package.json tsconfig.json",
 		"format": "biome format --write src tests package.json tsconfig.json",

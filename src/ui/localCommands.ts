@@ -7,6 +7,9 @@ export type LocalCommand =
 			sessionId: string;
 	  }
 	| {
+			type: "memory";
+	  }
+	| {
 			type: "invalid";
 			message: string;
 	  }
@@ -23,6 +26,10 @@ export function parseLocalCommand(input: string): LocalCommand | undefined {
 
 	if (trimmed === "/plan") {
 		return { type: "enter_plan_mode" };
+	}
+
+	if (trimmed === "/memory") {
+		return { type: "memory" };
 	}
 
 	const [rawName, ...args] = trimmed.split(/\s+/);

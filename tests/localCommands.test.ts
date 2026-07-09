@@ -11,6 +11,12 @@ test("parseLocalCommand parses plan commands", () => {
 	});
 });
 
+test("parseLocalCommand parses memory commands", () => {
+	expect(parseLocalCommand("/memory")).toEqual({
+		type: "memory",
+	});
+});
+
 test("parseLocalCommand parses resume commands", () => {
 	expect(parseLocalCommand("/resume session-1")).toEqual({
 		type: "resume",

@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { z } from "zod";
+import { ensureMemoryStore, getMemoryIndexPath } from "../src/memory";
 import type {
 	ModelClient,
 	ModelRequest,
@@ -18,6 +22,10 @@ const addTool: Tool<{ a: number; b: number }, { sum: number }> = {
 		return { sum: a + b };
 	},
 };
+
+async function makeTempDir(): Promise<string> {
+	return mkdtemp(join(tmpdir(), "cagent-query-"));
+}
 
 class FakeToolCallingModelClient implements ModelClient {
 	readonly name = "fake";
@@ -151,4 +159,50 @@ test("query rejects arguments that fail the tool input schema before calling it"
 	const toolMessage = terminal?.state.messages.find((m) => m.role === "tool");
 	expect(toolMessage?.content).toMatch(/^error:/);
 	expect(terminal?.state.observations[0]?.ok).toBe(false);
+});
+
+class RecordingModelClient implements ModelClient {
+	readonly name = "recording";
+	readonly requests: ModelRequest[] = [];
+
+	async *stream(request: ModelRequest): AsyncGenerator<ModelStreamEvent> {
+		this.requests.push(request);
+		yield { type: "text_delta", content: "done" };
+	}
+}
+
+test("query injects the memory prompt from the current memory index", async () => {
+	const cwd = await makeTempDir();
+	try {
+		await ensureMemoryStore(cwd);
+		await writeFile(
+			getMemoryIndexPath(cwd),
+			"# Memory\n\n- [Preferences](preferences.md) - prefers concise answers\n",
+		);
+
+		const model = new RecordingModelClient();
+		const initialState = createInitialState("use memory", cwd);
+
+		let terminal: Terminal | undefined;
+		for await (const event of query({ initialState, model, tools: [] })) {
+			if (event.type === "terminal") {
+				terminal = event.terminal;
+			}
+		}
+
+		const request = model.requests[0];
+		expect(request?.messages[0]?.role).toBe("system");
+		expect(request?.messages[0]?.content).toContain("# cagent memory");
+		expect(request?.messages[0]?.content).toContain("prefers concise answers");
+		expect(request?.messages.at(-1)).toEqual({
+			role: "user",
+			content: "use memory",
+		});
+		expect(terminal?.state.messages[0]).toEqual({
+			role: "user",
+			content: "use memory",
+		});
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
 });

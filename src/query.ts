@@ -1,3 +1,4 @@
+import { loadMemoryPrompt } from "./memory";
 import type { ModelClient } from "./model/client";
 import { getPlanModeReminder } from "./plan";
 import {
@@ -101,7 +102,7 @@ export async function* query({
 		const toolCalls: { id: string; name: string; arguments: string }[] = [];
 
 		for await (const event of model.stream({
-			messages: buildModelMessages(state),
+			messages: await buildModelMessages(state),
 			toolSpecs: state.toolSpecs,
 		})) {
 			if (event.type === "text_delta") {
@@ -232,13 +233,20 @@ export async function* query({
 	}
 }
 
-function buildModelMessages(state: AgentState): Message[] {
-	if (state.toolPermissionContext.mode !== "plan") {
-		return state.messages;
+async function buildModelMessages(state: AgentState): Promise<Message[]> {
+	const systemMessages: Message[] = [];
+
+	if (state.toolPermissionContext.mode === "plan") {
+		systemMessages.push({
+			role: "system",
+			content: getPlanModeReminder(state),
+		});
 	}
 
-	return [
-		{ role: "system", content: getPlanModeReminder(state) },
-		...state.messages,
-	];
+	const memoryPrompt = await loadMemoryPrompt(state.cwd).catch(() => undefined);
+	if (memoryPrompt) {
+		systemMessages.push({ role: "system", content: memoryPrompt });
+	}
+
+	return [...systemMessages, ...state.messages];
 }
