@@ -1,4 +1,12 @@
-import { loadMemoryPrompt } from "./memory";
+import {
+	buildMemorySelectionMessages,
+	formatMemoryManifest,
+	formatRelevantMemoriesPrompt,
+	loadMemoryPrompt,
+	parseSelectedMemoryFilenames,
+	readRelevantMemories,
+	scanMemoryFiles,
+} from "./memory";
 import type { ModelClient } from "./model/client";
 import { getPlanModeReminder } from "./plan";
 import {
@@ -102,7 +110,7 @@ export async function* query({
 		const toolCalls: { id: string; name: string; arguments: string }[] = [];
 
 		for await (const event of model.stream({
-			messages: await buildModelMessages(state),
+			messages: await buildModelMessages(state, model),
 			toolSpecs: state.toolSpecs,
 		})) {
 			if (event.type === "text_delta") {
@@ -233,7 +241,10 @@ export async function* query({
 	}
 }
 
-async function buildModelMessages(state: AgentState): Promise<Message[]> {
+async function buildModelMessages(
+	state: AgentState,
+	model: ModelClient,
+): Promise<Message[]> {
 	const systemMessages: Message[] = [];
 
 	if (state.toolPermissionContext.mode === "plan") {
@@ -248,5 +259,66 @@ async function buildModelMessages(state: AgentState): Promise<Message[]> {
 		systemMessages.push({ role: "system", content: memoryPrompt });
 	}
 
+	const relevantMemoriesPrompt = await loadRelevantMemoriesPrompt(
+		state,
+		model,
+	).catch(() => "");
+	if (relevantMemoriesPrompt) {
+		systemMessages.push({ role: "system", content: relevantMemoriesPrompt });
+	}
+
 	return [...systemMessages, ...state.messages];
+}
+
+async function loadRelevantMemoriesPrompt(
+	state: AgentState,
+	model: ModelClient,
+): Promise<string> {
+	const userInput = latestUserInput(state);
+	if (!userInput) {
+		return "";
+	}
+
+	const memories = await scanMemoryFiles(state.cwd);
+	if (memories.length === 0) {
+		return "";
+	}
+
+	const selectionOutput = await collectTextFromModel(
+		model,
+		buildMemorySelectionMessages({
+			userInput,
+			manifest: formatMemoryManifest(memories),
+		}),
+	);
+	const selected = parseSelectedMemoryFilenames(selectionOutput, memories);
+	if (selected.length === 0) {
+		return "";
+	}
+
+	const relevant = await readRelevantMemories(memories, selected);
+	return formatRelevantMemoriesPrompt(relevant);
+}
+
+function latestUserInput(state: AgentState): string {
+	for (let i = state.messages.length - 1; i >= 0; i--) {
+		const message = state.messages[i];
+		if (message?.role === "user") {
+			return message.content;
+		}
+	}
+	return "";
+}
+
+async function collectTextFromModel(
+	model: ModelClient,
+	messages: Message[],
+): Promise<string> {
+	let text = "";
+	for await (const event of model.stream({ messages, toolSpecs: [] })) {
+		if (event.type === "text_delta") {
+			text += event.content;
+		}
+	}
+	return text;
 }

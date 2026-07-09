@@ -171,6 +171,24 @@ class RecordingModelClient implements ModelClient {
 	}
 }
 
+class MemorySelectingModelClient implements ModelClient {
+	readonly name = "memory-selecting";
+	readonly requests: ModelRequest[] = [];
+
+	async *stream(request: ModelRequest): AsyncGenerator<ModelStreamEvent> {
+		this.requests.push(request);
+		if (request.messages[0]?.content.includes("select cagent memory files")) {
+			yield {
+				type: "text_delta",
+				content: JSON.stringify({ selected_memories: ["preferences.md"] }),
+			};
+			return;
+		}
+
+		yield { type: "text_delta", content: "done" };
+	}
+}
+
 test("query injects the memory prompt from the current memory index", async () => {
 	const cwd = await makeTempDir();
 	try {
@@ -202,6 +220,58 @@ test("query injects the memory prompt from the current memory index", async () =
 			role: "user",
 			content: "use memory",
 		});
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("query uses a side query to inject relevant memory topic files", async () => {
+	const cwd = await makeTempDir();
+	try {
+		await ensureMemoryStore(cwd);
+		await writeFile(
+			join(cwd, ".cagent", "memory", "preferences.md"),
+			[
+				"---",
+				"type: feedback",
+				"description: User prefers concise engineering answers",
+				"---",
+				"",
+				"Keep final answers short and focus on concrete changes.",
+			].join("\n"),
+		);
+
+		const model = new MemorySelectingModelClient();
+		const initialState = createInitialState("how should you answer me?", cwd);
+
+		let terminal: Terminal | undefined;
+		for await (const event of query({ initialState, model, tools: [] })) {
+			if (event.type === "terminal") {
+				terminal = event.terminal;
+			}
+		}
+
+		expect(terminal?.reason).toBe("complete");
+		expect(model.requests).toHaveLength(2);
+		expect(model.requests[0]?.messages[0]?.content).toContain(
+			"select cagent memory files",
+		);
+		const mainRequest = model.requests[1];
+		expect(
+			mainRequest?.messages.some((message) =>
+				message.content.includes("# relevant memories"),
+			),
+		).toBe(true);
+		expect(
+			mainRequest?.messages.some((message) =>
+				message.content.includes("Keep final answers short"),
+			),
+		).toBe(true);
+		expect(
+			terminal?.state.messages.some((message) =>
+				message.content.includes("Keep final answers short"),
+			),
+		).toBe(false);
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}
