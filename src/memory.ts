@@ -15,18 +15,47 @@ const MAX_RELEVANT_MEMORY_FILES = 5;
 const MAX_RELEVANT_MEMORY_LINES = 200;
 const MAX_RELEVANT_MEMORY_BYTES = 20_000;
 
+export const MEMORY_TYPES = [
+	"user",
+	"feedback",
+	"project",
+	"reference",
+] as const;
+export const MEMORY_CONFIDENCES = ["low", "medium", "high"] as const;
+export const MEMORY_STABILITIES = ["temporary", "evolving", "durable"] as const;
+
+export type MemoryType = (typeof MEMORY_TYPES)[number];
+export type MemoryConfidence = (typeof MEMORY_CONFIDENCES)[number];
+export type MemoryStability = (typeof MEMORY_STABILITIES)[number];
+
+export type MemoryMetadata = {
+	type?: MemoryType;
+	description?: string;
+	createdAt?: string;
+	updatedAt?: string;
+	source?: string;
+	confidence?: MemoryConfidence;
+	stability?: MemoryStability;
+	ttl?: string;
+};
+
+export type MemoryValidationIssue = {
+	path: string;
+	message: string;
+};
+
 export type MemoryStoreInfo = {
 	memoryDir: string;
 	indexPath: string;
-	files: string[];
+	files: MemoryHeader[];
 };
 
 export type MemoryHeader = {
 	filename: string;
 	filePath: string;
 	mtimeMs: number;
-	type?: string;
-	description?: string;
+	metadata: MemoryMetadata;
+	validationIssues: MemoryValidationIssue[];
 };
 
 export type RelevantMemory = {
@@ -63,7 +92,7 @@ export async function ensureMemoryStore(cwd: string): Promise<MemoryStoreInfo> {
 	return {
 		memoryDir,
 		indexPath,
-		files: await listMemoryFiles(memoryDir),
+		files: await scanMemoryHeaders(memoryDir, await listMemoryFiles(memoryDir)),
 	};
 }
 
@@ -87,7 +116,23 @@ export async function loadMemoryPrompt(cwd: string): Promise<string> {
 		"Do not save ephemeral task state, TODOs, plan details, raw session summaries, git history, or code facts that can be derived from the repository.",
 		"",
 		"When the user explicitly asks you to remember or forget something, update the memory store immediately if current mode permissions allow file writes.",
-		"Write durable memories as focused markdown topic files under the memory directory. Keep MEMORY.md as a short one-line index of those files.",
+		"Write memories as focused markdown topic files under the memory directory. Keep MEMORY.md as a short one-line index of those files.",
+		"",
+		"Every topic file must start with YAML frontmatter:",
+		"```yaml",
+		"---",
+		"type: user | feedback | project | reference",
+		"description: short human-readable summary",
+		"created_at: ISO-8601 timestamp",
+		"updated_at: ISO-8601 timestamp",
+		"source: user | assistant | tool | inferred",
+		"confidence: low | medium | high",
+		"stability: temporary | evolving | durable",
+		"ttl: optional ISO-8601 expiry timestamp for temporary memories",
+		"---",
+		"```",
+		"",
+		"Use stability=temporary only for information with a known expiry and include ttl. Use stability=evolving for preferences or project facts that may change. Use stability=durable for stable identity, workflow, or long-lived reference information.",
 		"If a memory may be relevant, read MEMORY.md or the linked topic files before relying on it. Treat memory as potentially stale and verify file/function claims against the current repo before acting on them.",
 		"In plan mode, do not write memory; wait until normal mode unless the user explicitly approves implementation.",
 		"",
@@ -99,7 +144,7 @@ export async function loadMemoryPrompt(cwd: string): Promise<string> {
 
 export function formatMemoryStoreSummary(info: MemoryStoreInfo): string {
 	const files = info.files.length
-		? info.files.map((file) => `- ${file}`).join("\n")
+		? info.files.map((file) => `- ${formatMemoryFileSummary(file)}`).join("\n")
 		: "No memory files yet.";
 
 	return [
@@ -115,48 +160,80 @@ export function formatMemoryStoreSummary(info: MemoryStoreInfo): string {
 
 export async function scanMemoryFiles(cwd: string): Promise<MemoryHeader[]> {
 	const info = await ensureMemoryStore(cwd);
-	const files = info.files.filter((file) => file !== MEMORY_ENTRYPOINT_NAME);
-
-	const results = await Promise.allSettled(
-		files
-			.slice(0, MAX_MEMORY_FILES)
-			.map(async (filename): Promise<MemoryHeader> => {
-				const filePath = join(info.memoryDir, filename);
-				const [headerText, fileStat] = await Promise.all([
-					readFile(filePath, "utf-8").then((text) =>
-						text.split("\n").slice(0, FRONTMATTER_MAX_LINES).join("\n"),
-					),
-					stat(filePath),
-				]);
-				const frontmatter = parseFrontmatter(headerText);
-				return {
-					filename,
-					filePath,
-					mtimeMs: fileStat.mtimeMs,
-					type: frontmatter.type,
-					description: frontmatter.description,
-				};
-			}),
-	);
-
-	return results
-		.filter((result): result is PromiseFulfilledResult<MemoryHeader> => {
-			return result.status === "fulfilled";
-		})
-		.map((result) => result.value)
+	return info.files
+		.filter((file) => file.filename !== MEMORY_ENTRYPOINT_NAME)
+		.filter((file) => !isMemoryExpired(file.metadata))
 		.sort((a, b) => b.mtimeMs - a.mtimeMs);
 }
 
 export function formatMemoryManifest(memories: MemoryHeader[]): string {
 	return memories
 		.map((memory) => {
-			const type = memory.type ? `[${memory.type}] ` : "";
-			const modified = new Date(memory.mtimeMs).toISOString();
-			return memory.description
-				? `- ${type}${memory.filename} (${modified}): ${memory.description}`
-				: `- ${type}${memory.filename} (${modified})`;
+			const type = memory.metadata.type ? `[${memory.metadata.type}] ` : "";
+			const modified =
+				memory.metadata.updatedAt ?? new Date(memory.mtimeMs).toISOString();
+			const stability = memory.metadata.stability
+				? `; stability=${memory.metadata.stability}`
+				: "";
+			const ttl = memory.metadata.ttl ? `; ttl=${memory.metadata.ttl}` : "";
+			const description = memory.metadata.description;
+			return description
+				? `- ${type}${memory.filename} (${modified}${stability}${ttl}): ${description}`
+				: `- ${type}${memory.filename} (${modified}${stability}${ttl})`;
 		})
 		.join("\n");
+}
+
+export function validateMemoryFile(
+	path: string,
+	content: string,
+): MemoryValidationIssue[] {
+	if (path.replace(/\\/g, "/").endsWith(`/${MEMORY_ENTRYPOINT_NAME}`)) {
+		return [];
+	}
+	if (path === MEMORY_ENTRYPOINT_NAME) {
+		return [];
+	}
+	return validateMemoryMetadata(path, parseFrontmatter(content));
+}
+
+export function validateMemoryMetadata(
+	path: string,
+	metadata: MemoryMetadata,
+): MemoryValidationIssue[] {
+	const issues: MemoryValidationIssue[] = [];
+	if (!metadata.type) {
+		issues.push({ path, message: "missing type" });
+	}
+	if (!metadata.description) {
+		issues.push({ path, message: "missing description" });
+	}
+	if (!metadata.stability) {
+		issues.push({ path, message: "missing stability" });
+	}
+	if (metadata.createdAt && !isIsoDate(metadata.createdAt)) {
+		issues.push({ path, message: "created_at must be an ISO-8601 timestamp" });
+	}
+	if (metadata.updatedAt && !isIsoDate(metadata.updatedAt)) {
+		issues.push({ path, message: "updated_at must be an ISO-8601 timestamp" });
+	}
+	if (metadata.ttl && !isIsoDate(metadata.ttl)) {
+		issues.push({ path, message: "ttl must be an ISO-8601 timestamp" });
+	}
+	if (metadata.stability === "temporary" && !metadata.ttl) {
+		issues.push({ path, message: "temporary memories must include ttl" });
+	}
+	return issues;
+}
+
+export function isMemoryExpired(
+	metadata: MemoryMetadata,
+	now = new Date(),
+): boolean {
+	if (!metadata.ttl || !isIsoDate(metadata.ttl)) {
+		return false;
+	}
+	return new Date(metadata.ttl).getTime() <= now.getTime();
 }
 
 export function buildMemorySelectionMessages(params: {
@@ -300,10 +377,38 @@ async function listMemoryFiles(memoryDir: string): Promise<string[]> {
 	});
 }
 
-function parseFrontmatter(content: string): {
-	type?: string;
-	description?: string;
-} {
+async function scanMemoryHeaders(
+	memoryDir: string,
+	files: string[],
+): Promise<MemoryHeader[]> {
+	const results = await Promise.allSettled(
+		files.slice(0, MAX_MEMORY_FILES).map(async (filename) => {
+			const filePath = join(memoryDir, filename);
+			const [headerText, fileStat] = await Promise.all([
+				readFile(filePath, "utf-8").then((text) =>
+					text.split("\n").slice(0, FRONTMATTER_MAX_LINES).join("\n"),
+				),
+				stat(filePath),
+			]);
+			const metadata = parseFrontmatter(headerText);
+			return {
+				filename,
+				filePath,
+				mtimeMs: fileStat.mtimeMs,
+				metadata,
+				validationIssues: validateMemoryMetadataForFilename(filename, metadata),
+			};
+		}),
+	);
+
+	return results
+		.filter((result): result is PromiseFulfilledResult<MemoryHeader> => {
+			return result.status === "fulfilled";
+		})
+		.map((result) => result.value);
+}
+
+function parseFrontmatter(content: string): MemoryMetadata {
 	const lines = content.split("\n");
 	if (lines[0]?.trim() !== "---") {
 		return {};
@@ -325,10 +430,86 @@ function parseFrontmatter(content: string): {
 		frontmatter[key] = rawValue.trim().replace(/^["']|["']$/g, "");
 	}
 
-	return {
-		type: frontmatter.type,
-		description: frontmatter.description,
-	};
+	const metadata: MemoryMetadata = {};
+	const type = parseMemoryType(frontmatter.type);
+	const confidence = parseMemoryConfidence(frontmatter.confidence);
+	const stability = parseMemoryStability(frontmatter.stability);
+	if (type) {
+		metadata.type = type;
+	}
+	if (frontmatter.description) {
+		metadata.description = frontmatter.description;
+	}
+	if (frontmatter.created_at) {
+		metadata.createdAt = frontmatter.created_at;
+	}
+	if (frontmatter.updated_at) {
+		metadata.updatedAt = frontmatter.updated_at;
+	}
+	if (frontmatter.source) {
+		metadata.source = frontmatter.source;
+	}
+	if (confidence) {
+		metadata.confidence = confidence;
+	}
+	if (stability) {
+		metadata.stability = stability;
+	}
+	if (frontmatter.ttl) {
+		metadata.ttl = frontmatter.ttl;
+	}
+	return metadata;
+}
+
+function validateMemoryMetadataForFilename(
+	filename: string,
+	metadata: MemoryMetadata,
+): MemoryValidationIssue[] {
+	if (filename === MEMORY_ENTRYPOINT_NAME) {
+		return [];
+	}
+	return validateMemoryMetadata(filename, metadata);
+}
+
+function formatMemoryFileSummary(memory: MemoryHeader): string {
+	if (memory.filename === MEMORY_ENTRYPOINT_NAME) {
+		return `${memory.filename} (index)`;
+	}
+
+	const details = [
+		memory.metadata.type,
+		memory.metadata.stability,
+		memory.metadata.ttl ? `ttl=${memory.metadata.ttl}` : undefined,
+		isMemoryExpired(memory.metadata) ? "expired" : undefined,
+		memory.validationIssues.length > 0
+			? `${memory.validationIssues.length} metadata issue(s)`
+			: undefined,
+	].filter(Boolean);
+	const suffix = details.length ? ` (${details.join(", ")})` : "";
+	return `${memory.filename}${suffix}`;
+}
+
+function parseMemoryType(value: string | undefined): MemoryType | undefined {
+	return MEMORY_TYPES.find((candidate) => candidate === value);
+}
+
+function parseMemoryConfidence(
+	value: string | undefined,
+): MemoryConfidence | undefined {
+	return MEMORY_CONFIDENCES.find((candidate) => candidate === value);
+}
+
+function parseMemoryStability(
+	value: string | undefined,
+): MemoryStability | undefined {
+	return MEMORY_STABILITIES.find((candidate) => candidate === value);
+}
+
+function isIsoDate(value: string): boolean {
+	const timestamp = Date.parse(value);
+	return (
+		Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value
+	);
 }
 
 function parseSelectedMemoryJson(output: string): unknown[] | undefined {

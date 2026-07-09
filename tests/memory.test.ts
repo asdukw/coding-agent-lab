@@ -9,10 +9,12 @@ import {
 	formatMemoryStoreSummary,
 	formatRelevantMemoriesPrompt,
 	getMemoryIndexPath,
+	isMemoryExpired,
 	loadMemoryPrompt,
 	parseSelectedMemoryFilenames,
 	readRelevantMemories,
 	scanMemoryFiles,
+	validateMemoryFile,
 } from "../src/memory";
 
 async function makeTempDir(): Promise<string> {
@@ -26,13 +28,16 @@ test("ensureMemoryStore creates an index and lists markdown memory files", async
 		let info = await ensureMemoryStore(cwd);
 
 		expect(info.indexPath).toBe(indexPath);
-		expect(info.files).toEqual(["MEMORY.md"]);
+		expect(info.files.map((file) => file.filename)).toEqual(["MEMORY.md"]);
 		expect(await readFile(indexPath, "utf-8")).toBe("# Memory\n\n");
 
 		await writeFile(join(cwd, ".cagent", "memory", "preferences.md"), "ok");
 		info = await ensureMemoryStore(cwd);
 
-		expect(info.files).toEqual(["MEMORY.md", "preferences.md"]);
+		expect(info.files.map((file) => file.filename)).toEqual([
+			"MEMORY.md",
+			"preferences.md",
+		]);
 		expect(formatMemoryStoreSummary(info)).toContain("preferences.md");
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
@@ -54,6 +59,7 @@ test("loadMemoryPrompt includes the memory paths and current index", async () =>
 		expect(prompt).toContain(join(cwd, ".cagent", "memory"));
 		expect(prompt).toContain("prefers concise answers");
 		expect(prompt).toContain("Do not save ephemeral task state");
+		expect(prompt).toContain("stability: temporary | evolving | durable");
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}
@@ -69,6 +75,11 @@ test("scanMemoryFiles builds a frontmatter manifest and reads selected memories"
 				"---",
 				"type: feedback",
 				"description: User prefers concise engineering answers",
+				"created_at: 2026-07-09T00:00:00.000Z",
+				"updated_at: 2026-07-09T00:00:00.000Z",
+				"source: user",
+				"confidence: high",
+				"stability: evolving",
 				"---",
 				"",
 				"Keep final answers short and focus on concrete changes.",
@@ -80,8 +91,11 @@ test("scanMemoryFiles builds a frontmatter manifest and reads selected memories"
 
 		expect(memories).toHaveLength(1);
 		expect(memories[0]?.filename).toBe("preferences.md");
-		expect(memories[0]?.type).toBe("feedback");
+		expect(memories[0]?.metadata.type).toBe("feedback");
+		expect(memories[0]?.metadata.confidence).toBe("high");
+		expect(memories[0]?.metadata.stability).toBe("evolving");
 		expect(manifest).toContain("[feedback] preferences.md");
+		expect(manifest).toContain("stability=evolving");
 
 		const selectionMessages = buildMemorySelectionMessages({
 			userInput: "how should you answer me?",
@@ -100,6 +114,45 @@ test("scanMemoryFiles builds a frontmatter manifest and reads selected memories"
 		expect(prompt).toContain("# relevant memories");
 		expect(prompt).toContain('path="preferences.md"');
 		expect(prompt).toContain("Keep final answers short");
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("validateMemoryFile reports metadata issues and expiry is honored", async () => {
+	const cwd = await makeTempDir();
+	try {
+		await ensureMemoryStore(cwd);
+		const expiredMemory = [
+			"---",
+			"type: project",
+			"description: Temporary branch context",
+			"created_at: 2026-07-08T00:00:00.000Z",
+			"updated_at: 2026-07-08T00:00:00.000Z",
+			"confidence: medium",
+			"stability: temporary",
+			"ttl: 2026-07-08T01:00:00.000Z",
+			"---",
+			"",
+			"Use branch old-plan.",
+		].join("\n");
+		await writeFile(
+			join(cwd, ".cagent", "memory", "temporary.md"),
+			expiredMemory,
+		);
+
+		expect(validateMemoryFile("broken.md", "plain text")).toEqual([
+			{ path: "broken.md", message: "missing type" },
+			{ path: "broken.md", message: "missing description" },
+			{ path: "broken.md", message: "missing stability" },
+		]);
+		expect(
+			isMemoryExpired(
+				{ ttl: "2026-07-08T01:00:00.000Z" },
+				new Date("2026-07-09T00:00:00.000Z"),
+			),
+		).toBe(true);
+		expect(await scanMemoryFiles(cwd)).toHaveLength(0);
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}
