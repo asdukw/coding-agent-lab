@@ -27,6 +27,8 @@ export const readTool: Tool<Input, Output> = {
 	name: "Read",
 	description:
 		"Read a text file from the local filesystem, optionally a line range",
+	isReadOnly: true,
+	isConcurrencySafe: true,
 	inputSchema,
 	async call({ file_path, offset, limit }) {
 		const text = await readFile(file_path, "utf-8");

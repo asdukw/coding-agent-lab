@@ -17,6 +17,8 @@ export const writeTool: Tool<Input, Output> = {
 	name: "Write",
 	description:
 		"Write content to a file, creating parent directories and overwriting any existing content",
+	isReadOnly: false,
+	isConcurrencySafe: false,
 	inputSchema,
 	async call({ file_path, content }) {
 		await mkdir(dirname(file_path), { recursive: true });

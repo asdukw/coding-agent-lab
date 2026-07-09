@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { BUILTIN_TOOLS } from "../src/tools";
 import { editTool } from "../src/tools/editTool";
 import { globTool } from "../src/tools/globTool";
 import { grepTool } from "../src/tools/grepTool";
@@ -11,6 +12,26 @@ import { writeTool } from "../src/tools/writeTool";
 async function makeTempDir(): Promise<string> {
 	return mkdtemp(join(tmpdir(), "cagent-tools-"));
 }
+
+test("built-in tools declare read-only and concurrency metadata", () => {
+	const metadata = new Map(BUILTIN_TOOLS.map((tool) => [tool.name, tool]));
+
+	for (const name of ["Read", "Glob", "Grep"]) {
+		expect(metadata.get(name)?.isReadOnly).toBe(true);
+		expect(metadata.get(name)?.isConcurrencySafe).toBe(true);
+	}
+
+	for (const name of [
+		"Write",
+		"Edit",
+		"EnterPlanMode",
+		"UpdatePlan",
+		"ExitPlanMode",
+	]) {
+		expect(metadata.get(name)?.isReadOnly).toBe(false);
+		expect(metadata.get(name)?.isConcurrencySafe).toBe(false);
+	}
+});
 
 test("readTool reads full content and reports totalLines", async () => {
 	const dir = await makeTempDir();

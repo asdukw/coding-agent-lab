@@ -38,8 +38,10 @@ test("saveSession writes JSONL events and loadSession hydrates runtime fields", 
 
 		expect(path).toBe(getSessionPath(cwd, "session-1"));
 		const raw = await readFile(path, "utf8");
-		expect(raw).toContain('"version":1');
+		expect(raw).toContain('"version":2');
 		expect(raw).toContain('"sessionId":"session-1"');
+		expect(raw).toContain('"timestamp"');
+		expect(raw).toContain('"payload"');
 		expect(raw).not.toContain('"toolSpecs"');
 		expect(raw).not.toContain('"inputSchema"');
 		expect(raw).not.toContain('"finalAnswer"');
@@ -49,10 +51,10 @@ test("saveSession writes JSONL events and loadSession hydrates runtime fields", 
 			.split("\n")
 			.map((line) => JSON.parse(line) as { type: string });
 		expect(events.map((event) => event.type)).toEqual([
-			"session_start",
-			"message",
-			"message",
-			"state",
+			"session_meta",
+			"user_message",
+			"assistant_message",
+			"state_snapshot",
 		]);
 
 		const restored = await loadSession(cwd, "session-1");
@@ -93,10 +95,10 @@ test("append APIs persist messages immediately and update the session index", as
 			.split("\n")
 			.map((line) => JSON.parse(line) as { type: string });
 		expect(events.map((event) => event.type)).toEqual([
-			"session_start",
-			"message",
-			"message",
-			"state",
+			"session_meta",
+			"user_message",
+			"assistant_message",
+			"state_snapshot",
 		]);
 
 		const index = await readFile(getSessionIndexPath(cwd), "utf8");
@@ -124,16 +126,118 @@ test("appendSessionMemoryExtraction records a lightweight background event", asy
 		const events = raw
 			.trim()
 			.split("\n")
-			.map((line) => JSON.parse(line) as { type: string; summary?: string });
+			.map(
+				(line) =>
+					JSON.parse(line) as {
+						type: string;
+						payload?: { summary?: string };
+					},
+			);
 
 		expect(events.map((event) => event.type)).toEqual([
-			"session_start",
+			"session_meta",
 			"memory_extraction",
 		]);
-		expect(events[1]?.summary).toBe("NO_MEMORY");
+		expect(events[1]?.payload?.summary).toBe("NO_MEMORY");
 
 		const restored = await loadSession(cwd, "memory-event-1");
 		expect(restored.messages).toEqual([]);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("assistant tool calls are stored as separate audit events", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "cagent-session-"));
+	try {
+		const message = {
+			role: "assistant" as const,
+			content: "",
+			toolCalls: [
+				{
+					id: "call-1",
+					name: "Read",
+					arguments: JSON.stringify({ file_path: "README.md" }),
+				},
+			],
+		};
+		const state: AgentState = {
+			...createInitialState("inspect", cwd, [], "tool-call-1"),
+			messages: [{ role: "user", content: "inspect" }, message],
+		};
+
+		await saveSession(cwd, state);
+		const raw = await readFile(getSessionPath(cwd, "tool-call-1"), "utf8");
+		const events = raw
+			.trim()
+			.split("\n")
+			.map(
+				(line) =>
+					JSON.parse(line) as {
+						type: string;
+						payload?: { name?: string; message?: unknown };
+					},
+			);
+
+		expect(events.map((event) => event.type)).toEqual([
+			"session_meta",
+			"user_message",
+			"assistant_message",
+			"tool_call",
+			"state_snapshot",
+		]);
+		expect(events[3]?.payload?.name).toBe("Read");
+
+		const restored = await loadSession(cwd, "tool-call-1");
+		expect(restored.messages).toEqual(state.messages);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("loadSession accepts legacy JSONL session events", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "cagent-session-"));
+	try {
+		await mkdir(join(cwd, ".cagent", "sessions"), { recursive: true });
+		await writeFile(
+			join(cwd, ".cagent", "sessions", "legacy-jsonl-1.jsonl"),
+			`${[
+				{
+					type: "session_start",
+					version: 1,
+					sessionId: "legacy-jsonl-1",
+					cwd,
+					task: "legacy jsonl",
+					createdAt: "2026-07-09T00:00:00.000Z",
+				},
+				{
+					type: "message",
+					sessionId: "legacy-jsonl-1",
+					message: { role: "user", content: "legacy jsonl" },
+					createdAt: "2026-07-09T00:00:00.000Z",
+				},
+				{
+					type: "state",
+					sessionId: "legacy-jsonl-1",
+					task: "legacy jsonl",
+					toolPermissionContext: { mode: "normal" },
+					plan: { items: [] },
+					turn: 1,
+					budget: { turnsUsed: 1, maxTurns: 20 },
+					savedAt: "2026-07-09T00:00:00.000Z",
+				},
+			]
+				.map((event) => JSON.stringify(event))
+				.join("\n")}\n`,
+			"utf8",
+		);
+
+		const restored = await loadSession(cwd, "legacy-jsonl-1");
+		expect(restored.sessionId).toBe("legacy-jsonl-1");
+		expect(restored.messages).toEqual([
+			{ role: "user", content: "legacy jsonl" },
+		]);
+		expect(restored.turn).toBe(1);
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}

@@ -28,6 +28,8 @@ export const enterPlanModeTool: Tool<
 	name: ENTER_PLAN_MODE_TOOL_NAME,
 	description:
 		"Enter plan mode to inspect the project and prepare a runtime plan before implementation",
+	isReadOnly: false,
+	isConcurrencySafe: false,
 	inputSchema: noInputSchema,
 	async call(_input, context) {
 		const toolContext = requireContext(context);
@@ -65,6 +67,8 @@ export const updatePlanTool: Tool<
 	name: UPDATE_PLAN_TOOL_NAME,
 	description:
 		"Update the runtime plan. Provide the full ordered step list each time; this does not write any local files.",
+	isReadOnly: false,
+	isConcurrencySafe: false,
 	inputSchema: updatePlanInputSchema,
 	async call({ explanation, items }, context) {
 		const toolContext = requireContext(context);
@@ -97,6 +101,8 @@ export const exitPlanModeTool: Tool<
 	name: EXIT_PLAN_MODE_TOOL_NAME,
 	description:
 		"Present the current runtime plan for user approval and pause before implementation",
+	isReadOnly: false,
+	isConcurrencySafe: false,
 	inputSchema: noInputSchema,
 	async call(_input, context) {
 		const toolContext = requireContext(context);

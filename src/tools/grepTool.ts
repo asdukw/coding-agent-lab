@@ -32,6 +32,8 @@ const DEFAULT_IGNORE = ["**/node_modules/**", "**/.git/**"];
 export const grepTool: Tool<Input, Output> = {
 	name: "Grep",
 	description: "Search file contents for a regular expression",
+	isReadOnly: true,
+	isConcurrencySafe: true,
 	inputSchema,
 	async call({
 		pattern,

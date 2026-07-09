@@ -20,6 +20,8 @@ type Output = { replacements: number };
 export const editTool: Tool<Input, Output> = {
 	name: "Edit",
 	description: "Find and replace an exact string in a file",
+	isReadOnly: false,
+	isConcurrencySafe: false,
 	inputSchema,
 	async call({ file_path, old_string, new_string, replace_all }) {
 		const text = await readFile(file_path, "utf-8");

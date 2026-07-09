@@ -10,6 +10,8 @@ export type ToolContext = {
 export type Tool<Input = unknown, Output = unknown> = {
 	name: string;
 	description: string;
+	isReadOnly?: boolean;
+	isConcurrencySafe?: boolean;
 	inputSchema: z.ZodType<Input>;
 	call(input: Input, context?: ToolContext): Promise<Output>;
 };

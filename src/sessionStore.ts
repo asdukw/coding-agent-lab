@@ -41,6 +41,62 @@ export type StoredSession = {
 
 export type SessionEvent =
 	| {
+			version: 2;
+			timestamp: string;
+			type: "session_meta";
+			sessionId: string;
+			payload: {
+				cwd: string;
+				task: string;
+			};
+	  }
+	| {
+			version: 2;
+			timestamp: string;
+			type: "user_message" | "assistant_message" | "tool_result";
+			sessionId: string;
+			payload: {
+				message: Message;
+			};
+	  }
+	| {
+			version: 2;
+			timestamp: string;
+			type: "tool_call";
+			sessionId: string;
+			payload: {
+				id: string;
+				name: string;
+				arguments: string;
+			};
+	  }
+	| {
+			version: 2;
+			timestamp: string;
+			type: "state_snapshot";
+			sessionId: string;
+			payload: {
+				task: string;
+				toolPermissionContext: ToolPermissionContext;
+				plan: RuntimePlan;
+				turn: number;
+				budget: BudgetState;
+			};
+	  }
+	| {
+			version: 2;
+			timestamp: string;
+			type: "memory_extraction";
+			sessionId: string;
+			payload: {
+				subAgentSessionId: string;
+				ok: boolean;
+				summary: string;
+			};
+	  };
+
+type LegacySessionEvent =
+	| {
 			type: "session_start";
 			version: 1;
 			sessionId: string;
@@ -100,12 +156,14 @@ export async function ensureSessionStarted(
 	}
 
 	await appendSessionEvent(cwd, {
-		type: "session_start",
-		version: 1,
+		version: 2,
+		timestamp: new Date().toISOString(),
+		type: "session_meta",
 		sessionId: state.sessionId,
-		cwd: state.cwd,
-		task: state.task,
-		createdAt: new Date().toISOString(),
+		payload: {
+			cwd: state.cwd,
+			task: state.task,
+		},
 	});
 	await appendSessionIndex(cwd, state);
 	return path;
@@ -117,12 +175,9 @@ export async function appendSessionMessage(
 	message: Message,
 ): Promise<void> {
 	await ensureSessionStarted(cwd, state);
-	await appendSessionEvent(cwd, {
-		type: "message",
-		sessionId: state.sessionId,
-		message,
-		createdAt: new Date().toISOString(),
-	});
+	for (const event of createMessageEvents(state.sessionId, message)) {
+		await appendSessionEvent(cwd, event);
+	}
 }
 
 export async function appendSessionState(
@@ -131,14 +186,17 @@ export async function appendSessionState(
 ): Promise<void> {
 	await ensureSessionStarted(cwd, state);
 	await appendSessionEvent(cwd, {
-		type: "state",
+		version: 2,
+		timestamp: new Date().toISOString(),
+		type: "state_snapshot",
 		sessionId: state.sessionId,
-		task: state.task,
-		toolPermissionContext: state.toolPermissionContext,
-		plan: state.plan,
-		turn: state.turn,
-		budget: state.budget,
-		savedAt: new Date().toISOString(),
+		payload: {
+			task: state.task,
+			toolPermissionContext: state.toolPermissionContext,
+			plan: state.plan,
+			turn: state.turn,
+			budget: state.budget,
+		},
 	});
 	await appendSessionIndex(cwd, state);
 }
@@ -154,12 +212,15 @@ export async function appendSessionMemoryExtraction(
 ): Promise<void> {
 	await ensureSessionStarted(cwd, state);
 	await appendSessionEvent(cwd, {
+		version: 2,
+		timestamp: new Date().toISOString(),
 		type: "memory_extraction",
 		sessionId: state.sessionId,
-		subAgentSessionId: result.subAgentSessionId,
-		ok: result.ok,
-		summary: result.summary,
-		createdAt: new Date().toISOString(),
+		payload: {
+			subAgentSessionId: result.subAgentSessionId,
+			ok: result.ok,
+			summary: result.summary,
+		},
 	});
 }
 
@@ -170,30 +231,30 @@ export async function saveSession(
 	const path = getSessionPath(cwd, state.sessionId);
 	const events: SessionEvent[] = [
 		{
-			type: "session_start",
-			version: 1,
+			version: 2,
+			timestamp: new Date().toISOString(),
+			type: "session_meta",
 			sessionId: state.sessionId,
-			cwd: state.cwd,
-			task: state.task,
-			createdAt: new Date().toISOString(),
+			payload: {
+				cwd: state.cwd,
+				task: state.task,
+			},
 		},
-		...state.messages.map((message): SessionEvent => {
-			return {
-				type: "message",
-				sessionId: state.sessionId,
-				message,
-				createdAt: new Date().toISOString(),
-			};
-		}),
+		...state.messages.flatMap((message) =>
+			createMessageEvents(state.sessionId, message),
+		),
 		{
-			type: "state",
+			version: 2,
+			timestamp: new Date().toISOString(),
+			type: "state_snapshot",
 			sessionId: state.sessionId,
-			task: state.task,
-			toolPermissionContext: state.toolPermissionContext,
-			plan: state.plan,
-			turn: state.turn,
-			budget: state.budget,
-			savedAt: new Date().toISOString(),
+			payload: {
+				task: state.task,
+				toolPermissionContext: state.toolPermissionContext,
+				plan: state.plan,
+				turn: state.turn,
+				budget: state.budget,
+			},
 		},
 	];
 
@@ -271,12 +332,14 @@ function replaySessionEvents(
 			continue;
 		}
 
-		const event = JSON.parse(line) as SessionEvent;
+		const event = JSON.parse(line) as SessionEvent | LegacySessionEvent;
 		if (event.sessionId !== sessionId) {
 			throw new Error(`session id mismatch in event: ${sessionId}`);
 		}
 
-		if (event.type === "session_start") {
+		if (isCurrentSessionEvent(event)) {
+			state = applyCurrentSessionEvent(state, event);
+		} else if (event.type === "session_start") {
 			state = {
 				...state,
 				sessionId: event.sessionId,
@@ -298,6 +361,97 @@ function replaySessionEvents(
 				budget: event.budget,
 			};
 		}
+	}
+
+	return state;
+}
+
+function createMessageEvents(
+	sessionId: string,
+	message: Message,
+): SessionEvent[] {
+	const timestamp = new Date().toISOString();
+	const type = messageEventType(message);
+	const events: SessionEvent[] = [
+		{
+			version: 2,
+			timestamp,
+			type,
+			sessionId,
+			payload: { message },
+		},
+	];
+
+	if (message.role === "assistant" && message.toolCalls) {
+		for (const call of message.toolCalls) {
+			events.push({
+				version: 2,
+				timestamp,
+				type: "tool_call",
+				sessionId,
+				payload: {
+					id: call.id,
+					name: call.name,
+					arguments: call.arguments,
+				},
+			});
+		}
+	}
+
+	return events;
+}
+
+function messageEventType(
+	message: Message,
+): "user_message" | "assistant_message" | "tool_result" {
+	if (message.role === "user") {
+		return "user_message";
+	}
+	if (message.role === "tool") {
+		return "tool_result";
+	}
+	return "assistant_message";
+}
+
+function isCurrentSessionEvent(
+	event: SessionEvent | LegacySessionEvent,
+): event is SessionEvent {
+	return "version" in event && event.version === 2;
+}
+
+function applyCurrentSessionEvent(
+	state: StoredSessionState,
+	event: SessionEvent,
+): StoredSessionState {
+	if (event.type === "session_meta") {
+		return {
+			...state,
+			sessionId: event.sessionId,
+			task: event.payload.task,
+			cwd: event.payload.cwd,
+		};
+	}
+
+	if (
+		event.type === "user_message" ||
+		event.type === "assistant_message" ||
+		event.type === "tool_result"
+	) {
+		return {
+			...state,
+			messages: [...state.messages, event.payload.message],
+		};
+	}
+
+	if (event.type === "state_snapshot") {
+		return {
+			...state,
+			task: event.payload.task,
+			toolPermissionContext: event.payload.toolPermissionContext,
+			plan: event.payload.plan,
+			turn: event.payload.turn,
+			budget: event.payload.budget,
+		};
 	}
 
 	return state;

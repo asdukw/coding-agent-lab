@@ -20,6 +20,8 @@ type Output = { filenames: string[] };
 export const globTool: Tool<Input, Output> = {
 	name: "Glob",
 	description: "Find files matching a glob pattern",
+	isReadOnly: true,
+	isConcurrencySafe: true,
 	inputSchema,
 	async call({ pattern, path }) {
 		const filenames = await glob(pattern, { cwd: path ?? process.cwd() });
