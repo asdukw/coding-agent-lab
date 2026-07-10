@@ -1,4 +1,11 @@
-import { ensureMemoryStore } from "./memory";
+import { readFile } from "node:fs/promises";
+import {
+	ensureMemoryStore,
+	formatMemoryManifest,
+	MEMORY_ENTRYPOINT_NAME,
+	refreshMemoryIndex,
+	validateMemoryStore,
+} from "./memory";
 import type { ModelClient } from "./model/client";
 import { query } from "./query";
 import {
@@ -37,7 +44,12 @@ export async function runMemoryExtractionSubAgent(params: {
 	let finalAnswer = "";
 	try {
 		const memoryStore = await ensureMemoryStore(state.cwd);
-		const task = buildMemoryExtractionTask(state, memoryStore.memoryDir);
+		const existingMemoryContext = await buildExistingMemoryContext(memoryStore);
+		const task = buildMemoryExtractionTask(
+			state,
+			memoryStore.memoryDir,
+			existingMemoryContext,
+		);
 		const initialState: AgentState = {
 			...createInitialState(
 				task,
@@ -64,6 +76,15 @@ export async function runMemoryExtractionSubAgent(params: {
 			if (event.type === "terminal") {
 				finalAnswer = event.terminal.state.finalAnswer ?? "";
 			}
+		}
+		await refreshMemoryIndex(state.cwd);
+		const validationIssues = await validateMemoryStore(state.cwd);
+		if (validationIssues.length > 0) {
+			return {
+				subAgentSessionId,
+				ok: false,
+				summary: formatValidationSummary(validationIssues),
+			};
 		}
 		return {
 			subAgentSessionId,
@@ -101,6 +122,7 @@ export function shouldRequestMemoryExtraction(state: AgentState): boolean {
 function buildMemoryExtractionTask(
 	state: AgentState,
 	memoryDir: string,
+	existingMemoryContext: string,
 ): string {
 	const latest = latestUserAssistantPair(state.messages);
 	const transcript = latest
@@ -112,13 +134,17 @@ function buildMemoryExtractionTask(
 		"",
 		`Memory directory: ${memoryDir}`,
 		"",
+		"Existing memory state, read before deciding whether to create a new file:",
+		existingMemoryContext,
+		"",
 		"Review the transcript below and decide whether it contains stable cross-session memory worth saving.",
 		"Only save user preferences, feedback about how to work with the user, project context not obvious from the repo, or external reference locations.",
 		"Do not save ephemeral task state, raw summaries, TODOs, git history, or code facts that can be derived from current files.",
 		"",
 		"If there is nothing worth saving, do not call tools and answer exactly: NO_MEMORY.",
-		"If there is memory worth saving, use Read/Glob/Grep as needed, then Write/Edit markdown files under the memory directory and keep MEMORY.md as a short index.",
+		"If there is memory worth saving, update an existing topic file when the topic already exists; only create a new focused markdown file for genuinely new stable memory.",
 		"Every topic file must use the cagent memory frontmatter schema with type, description, created_at, updated_at, source, confidence, stability, and optional ttl.",
+		"Do not edit MEMORY.md directly; it is regenerated automatically after extraction.",
 		"Use ISO-8601 timestamps. Prefer stability=evolving for preferences or project facts that may change.",
 		"After writing, answer with a one-line summary of what memory changed.",
 		"",
@@ -127,6 +153,36 @@ function buildMemoryExtractionTask(
 		transcript,
 		"```",
 	].join("\n");
+}
+
+async function buildExistingMemoryContext(
+	memoryStore: Awaited<ReturnType<typeof ensureMemoryStore>>,
+): Promise<string> {
+	const topicFiles = memoryStore.files.filter(
+		(file) => file.filename !== MEMORY_ENTRYPOINT_NAME,
+	);
+	const index = await readFile(memoryStore.indexPath, "utf-8").catch(() => "");
+	const manifest = formatMemoryManifest(topicFiles);
+	return [
+		`Current ${MEMORY_ENTRYPOINT_NAME}:`,
+		"```markdown",
+		index.trim() || "# Memory",
+		"```",
+		"",
+		"Existing topic manifest:",
+		manifest || "No existing memory topic files.",
+	].join("\n");
+}
+
+function formatValidationSummary(
+	issues: { path: string; message: string }[],
+): string {
+	const details = issues
+		.slice(0, 5)
+		.map((issue) => `${issue.path}: ${issue.message}`)
+		.join("; ");
+	const suffix = issues.length > 5 ? `; +${issues.length - 5} more` : "";
+	return `memory validation failed: ${details}${suffix}`;
 }
 
 function latestUserAssistantPair(

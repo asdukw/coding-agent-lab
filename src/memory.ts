@@ -96,6 +96,38 @@ export async function ensureMemoryStore(cwd: string): Promise<MemoryStoreInfo> {
 	};
 }
 
+export async function refreshMemoryIndex(
+	cwd: string,
+): Promise<MemoryStoreInfo> {
+	const memoryDir = getMemoryDir(cwd);
+	const indexPath = getMemoryIndexPath(cwd);
+
+	await mkdir(memoryDir, { recursive: true });
+	const files = await scanMemoryHeaders(
+		memoryDir,
+		await listMemoryFiles(memoryDir),
+	);
+	const topicFiles = files.filter(
+		(file) => file.filename !== MEMORY_ENTRYPOINT_NAME,
+	);
+	await writeFile(indexPath, formatMemoryIndex(topicFiles), "utf-8");
+
+	return {
+		memoryDir,
+		indexPath,
+		files: await scanMemoryHeaders(memoryDir, await listMemoryFiles(memoryDir)),
+	};
+}
+
+export async function validateMemoryStore(
+	cwd: string,
+): Promise<MemoryValidationIssue[]> {
+	const info = await ensureMemoryStore(cwd);
+	return info.files
+		.filter((file) => file.filename !== MEMORY_ENTRYPOINT_NAME)
+		.flatMap((file) => file.validationIssues);
+}
+
 export async function loadMemoryPrompt(cwd: string): Promise<string> {
 	const info = await ensureMemoryStore(cwd);
 	const rawIndex = await readFile(info.indexPath, "utf-8");
@@ -487,6 +519,30 @@ function formatMemoryFileSummary(memory: MemoryHeader): string {
 	].filter(Boolean);
 	const suffix = details.length ? ` (${details.join(", ")})` : "";
 	return `${memory.filename}${suffix}`;
+}
+
+function formatMemoryIndex(memories: MemoryHeader[]): string {
+	const visibleMemories = memories
+		.filter((memory) => !isMemoryExpired(memory.metadata))
+		.sort((a, b) => a.filename.localeCompare(b.filename));
+	if (visibleMemories.length === 0) {
+		return DEFAULT_MEMORY_INDEX_CONTENT;
+	}
+
+	const lines = visibleMemories.map((memory) => {
+		const description =
+			memory.metadata.description ?? "Missing memory description";
+		const details = [
+			memory.metadata.type,
+			memory.metadata.stability,
+			memory.validationIssues.length > 0
+				? `${memory.validationIssues.length} metadata issue(s)`
+				: undefined,
+		].filter(Boolean);
+		const suffix = details.length ? ` (${details.join(", ")})` : "";
+		return `- [${description}](${memory.filename})${suffix}`;
+	});
+	return `# Memory\n\n${lines.join("\n")}\n`;
 }
 
 function parseMemoryType(value: string | undefined): MemoryType | undefined {

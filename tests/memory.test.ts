@@ -13,8 +13,10 @@ import {
 	loadMemoryPrompt,
 	parseSelectedMemoryFilenames,
 	readRelevantMemories,
+	refreshMemoryIndex,
 	scanMemoryFiles,
 	validateMemoryFile,
+	validateMemoryStore,
 } from "../src/memory";
 
 async function makeTempDir(): Promise<string> {
@@ -153,6 +155,49 @@ test("validateMemoryFile reports metadata issues and expiry is honored", async (
 			),
 		).toBe(true);
 		expect(await scanMemoryFiles(cwd)).toHaveLength(0);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("refreshMemoryIndex rebuilds MEMORY.md from topic frontmatter", async () => {
+	const cwd = await makeTempDir();
+	try {
+		await ensureMemoryStore(cwd);
+		await writeFile(
+			join(cwd, ".cagent", "memory", "preferences.md"),
+			[
+				"---",
+				"type: feedback",
+				"description: User prefers concise answers",
+				"created_at: 2026-07-09T00:00:00.000Z",
+				"updated_at: 2026-07-09T00:00:00.000Z",
+				"source: user",
+				"confidence: high",
+				"stability: evolving",
+				"---",
+				"",
+				"Keep answers concise.",
+			].join("\n"),
+		);
+		await writeFile(
+			join(cwd, ".cagent", "memory", "broken.md"),
+			"---\ntype: user\n---\n\nMissing metadata.",
+		);
+
+		await refreshMemoryIndex(cwd);
+		const index = await readFile(getMemoryIndexPath(cwd), "utf-8");
+
+		expect(index).toContain(
+			"- [User prefers concise answers](preferences.md) (feedback, evolving)",
+		);
+		expect(index).toContain(
+			"- [Missing memory description](broken.md) (user, 2 metadata issue(s))",
+		);
+		expect(await validateMemoryStore(cwd)).toEqual([
+			{ path: "broken.md", message: "missing description" },
+			{ path: "broken.md", message: "missing stability" },
+		]);
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}
