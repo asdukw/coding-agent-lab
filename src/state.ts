@@ -37,6 +37,7 @@ export type BudgetState = {
 };
 
 export type AgentMode = "normal" | "plan";
+export type AgentType = "main" | "memory";
 
 export type PlanItemStatus = "pending" | "in_progress" | "completed";
 
@@ -57,6 +58,11 @@ export type PendingPlanApproval = {
 
 export type ToolPermissionContext = {
 	mode: AgentMode;
+	agentType: AgentType;
+	writePolicy?: {
+		allow?: string[];
+		deny?: string[];
+	};
 	prePlanMode?: AgentMode;
 	pendingPlanApproval?: PendingPlanApproval;
 };
@@ -134,17 +140,26 @@ export function continueState(prev: AgentState, task: string): AgentState {
 
 export function createToolPermissionContext(
 	_cwd?: string,
+	options: {
+		mode?: AgentMode;
+		agentType?: AgentType;
+		writePolicy?: ToolPermissionContext["writePolicy"];
+	} = {},
 ): ToolPermissionContext {
 	return {
-		mode: "normal",
+		mode: options.mode ?? "normal",
+		agentType: options.agentType ?? "main",
+		writePolicy: options.writePolicy,
 	};
 }
 
 export function ensureToolPermissionContext(state: AgentState): AgentState {
 	return {
 		...state,
-		toolPermissionContext:
-			state.toolPermissionContext ?? createToolPermissionContext(state.cwd),
+		toolPermissionContext: normalizeToolPermissionContext(
+			state.toolPermissionContext,
+			state.cwd,
+		),
 		plan: state.plan ?? createEmptyPlan(),
 	};
 }
@@ -260,4 +275,17 @@ export function resolvePlanApproval(
 
 function createEmptyPlan(): RuntimePlan {
 	return { items: [] };
+}
+
+export function normalizeToolPermissionContext(
+	context: Partial<ToolPermissionContext> | undefined,
+	cwd?: string,
+): ToolPermissionContext {
+	const defaults = createToolPermissionContext(cwd);
+	return {
+		...defaults,
+		...context,
+		mode: context?.mode ?? defaults.mode,
+		agentType: context?.agentType ?? defaults.agentType,
+	};
 }

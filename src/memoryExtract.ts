@@ -1,7 +1,12 @@
 import { ensureMemoryStore } from "./memory";
 import type { ModelClient } from "./model/client";
 import { query } from "./query";
-import { type AgentState, createInitialState, type Message } from "./state";
+import {
+	type AgentState,
+	createInitialState,
+	createToolPermissionContext,
+	type Message,
+} from "./state";
 import { editTool, globTool, grepTool, readTool, writeTool } from "./tools";
 import type { Tools } from "./tools/types";
 import { toToolSpecs } from "./tools/types";
@@ -40,6 +45,9 @@ export async function runMemoryExtractionSubAgent(params: {
 				toToolSpecs(MEMORY_EXTRACTION_TOOLS),
 				subAgentSessionId,
 			),
+			toolPermissionContext: createToolPermissionContext(state.cwd, {
+				agentType: "memory",
+			}),
 			maxTurns: MEMORY_EXTRACTION_MAX_TURNS,
 			budget: {
 				turnsUsed: 0,

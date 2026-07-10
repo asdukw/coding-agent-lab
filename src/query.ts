@@ -14,8 +14,9 @@ import {
 	ensureToolPermissionContext,
 	type Message,
 } from "./state";
-import { authorizeToolCall, getToolsForMode } from "./tools/permissions";
+import { getToolsForMode } from "./tools/permissions";
 import { EXIT_PLAN_MODE_TOOL_NAME } from "./tools/planToolNames";
+import { runToolCall } from "./tools/runner";
 import { type Tools, toToolSpecs } from "./tools/types";
 
 export type QueryParams = {
@@ -191,54 +192,34 @@ export async function* query({
 		};
 
 		for (const call of toolCalls) {
-			let ok = true;
-			let resultContent: string;
-			let args: Record<string, unknown> = {};
-
-			try {
-				const tool = runtimeTools.find((t) => t.name === call.name);
-				if (!tool) {
-					throw new Error(`unknown tool: ${call.name}`);
-				}
-				args = tool.inputSchema.parse(JSON.parse(call.arguments)) as Record<
-					string,
-					unknown
-				>;
-				authorizeToolCall(state, tool, args);
-				const output = await tool.call(args, {
+			const result = await runToolCall({
+				call,
+				tools: runtimeTools,
+				context: {
 					getState: () => state,
 					setState(next) {
 						state = typeof next === "function" ? next(state) : next;
 					},
-				});
-				resultContent = JSON.stringify(output);
-			} catch (caught) {
-				ok = false;
-				resultContent = `error: ${caught instanceof Error ? caught.message : String(caught)}`;
-			}
-
-			const toolMessage: Message = {
-				role: "tool",
-				content: resultContent,
-				toolCallId: call.id,
-			};
+				},
+			});
 			state = {
 				...state,
-				lastToolCall: { name: call.name, args },
-				observations: [
-					...state.observations,
-					{ tool: call.name, args, ok, output: resultContent },
-				],
-				messages: [...state.messages, toolMessage],
+				lastToolCall: { name: call.name, args: result.args },
+				observations: [...state.observations, result.observation],
+				messages: [...state.messages, result.message],
 			};
 			yield {
 				type: "message",
-				message: toolMessage,
+				message: result.message,
 			};
 
 			const pendingPlanApproval =
 				state.toolPermissionContext.pendingPlanApproval;
-			if (ok && call.name === EXIT_PLAN_MODE_TOOL_NAME && pendingPlanApproval) {
+			if (
+				result.ok &&
+				call.name === EXIT_PLAN_MODE_TOOL_NAME &&
+				pendingPlanApproval
+			) {
 				yield {
 					type: "plan_approval_request",
 					plan: pendingPlanApproval.plan,

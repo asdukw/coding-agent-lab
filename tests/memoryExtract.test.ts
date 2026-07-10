@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getMemoryDir } from "../src/memory";
@@ -53,6 +53,31 @@ class MemoryWritingModelClient implements ModelClient {
 	}
 }
 
+class MemoryEscapingModelClient implements ModelClient {
+	readonly name = "memory-escaping";
+	private callCount = 0;
+
+	constructor(private readonly cwd: string) {}
+
+	async *stream(_request: ModelRequest): AsyncGenerator<ModelStreamEvent> {
+		this.callCount++;
+		if (this.callCount === 1) {
+			yield {
+				type: "tool_call",
+				id: "write-outside-memory",
+				name: "Write",
+				arguments: JSON.stringify({
+					file_path: join(this.cwd, "outside.md"),
+					content: "should not be written",
+				}),
+			};
+			return;
+		}
+
+		yield { type: "text_delta", content: "done" };
+	}
+}
+
 test("memory extraction sub agent can write memory files", async () => {
 	const cwd = await makeTempDir();
 	try {
@@ -81,6 +106,37 @@ test("memory extraction sub agent can write memory files", async () => {
 		expect(
 			await readFile(join(getMemoryDir(cwd), "preferences.md"), "utf8"),
 		).toContain("Keep answers concise.");
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("memory extraction sub agent cannot write outside memory files", async () => {
+	const cwd = await makeTempDir();
+	try {
+		const state = {
+			...createInitialState("please remember I like concise answers", cwd),
+			sessionId: "main-session",
+			turn: 1,
+			messages: [
+				{
+					role: "user" as const,
+					content: "please remember I like concise answers",
+				},
+				{ role: "assistant" as const, content: "I'll keep that in mind." },
+			],
+		};
+		const result = await runMemoryExtractionSubAgent({
+			state,
+			model: new MemoryEscapingModelClient(cwd),
+		});
+
+		expect(result).toEqual({
+			subAgentSessionId: "main-session.memory.1",
+			ok: true,
+			summary: "done",
+		});
+		await expect(access(join(cwd, "outside.md"))).rejects.toThrow();
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}

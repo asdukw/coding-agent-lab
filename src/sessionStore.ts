@@ -9,8 +9,8 @@ import { dirname, relative, resolve, sep } from "node:path";
 import {
 	type AgentState,
 	type BudgetState,
-	createToolPermissionContext,
 	type Message,
+	normalizeToolPermissionContext,
 	type RuntimePlan,
 	type ToolPermissionContext,
 } from "./state";
@@ -513,8 +513,10 @@ function fromStoredSessionState(
 		task: state.task ?? "",
 		cwd,
 		toolSpecs: toToolSpecs(BUILTIN_TOOLS),
-		toolPermissionContext:
-			state.toolPermissionContext ?? createToolPermissionContext(),
+		toolPermissionContext: normalizeToolPermissionContext(
+			state.toolPermissionContext,
+			cwd,
+		),
 		plan: state.plan ?? { items: [] },
 		messages: state.messages ?? [],
 		todos: [],
