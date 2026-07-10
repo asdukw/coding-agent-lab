@@ -1,12 +1,19 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+	ensureMemoryStore,
+	getMemoryDir,
+	MAX_MEMORY_TOPIC_BYTES,
+} from "../src/memory";
+import { createInitialState } from "../src/state";
 import { BUILTIN_TOOLS } from "../src/tools";
 import { editTool } from "../src/tools/editTool";
 import { globTool } from "../src/tools/globTool";
 import { grepTool } from "../src/tools/grepTool";
 import { readTool } from "../src/tools/readTool";
+import type { ToolContext } from "../src/tools/types";
 import { writeTool } from "../src/tools/writeTool";
 
 async function makeTempDir(): Promise<string> {
@@ -121,6 +128,33 @@ test("editTool replaces every match with replace_all", async () => {
 
 	expect(result.replacements).toBe(2);
 	expect(await readFile(filePath, "utf-8")).toBe("bar bar");
+});
+
+test("editTool rejects oversized memory before reading it in full", async () => {
+	const dir = await makeTempDir();
+	try {
+		await ensureMemoryStore(dir);
+		const memoryPath = join(getMemoryDir(dir), "oversized.md");
+		await writeFile(memoryPath, "x".repeat(MAX_MEMORY_TOPIC_BYTES + 1));
+		const state = createInitialState("edit memory", dir);
+		const context: ToolContext = {
+			getState: () => state,
+			setState() {},
+		};
+
+		await expect(
+			editTool.call(
+				{
+					file_path: memoryPath,
+					old_string: "x",
+					new_string: "y",
+				},
+				context,
+			),
+		).rejects.toThrow(`must not exceed ${MAX_MEMORY_TOPIC_BYTES} bytes`);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
 });
 
 test("globTool finds files matching a pattern", async () => {

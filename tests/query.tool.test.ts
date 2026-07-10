@@ -1,9 +1,22 @@
 import { expect, test } from "bun:test";
-import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+	access,
+	link,
+	mkdir,
+	mkdtemp,
+	readFile,
+	rm,
+	symlink,
+	writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import { ensureMemoryStore, getMemoryIndexPath } from "../src/memory";
+import {
+	ensureMemoryStore,
+	getMemoryDir,
+	getMemoryIndexPath,
+} from "../src/memory";
 import type {
 	ModelClient,
 	ModelRequest,
@@ -142,9 +155,19 @@ class WritePathModelClient implements ModelClient {
 	readonly name = "write-path";
 	private callCount = 0;
 
-	constructor(private readonly filePath: string) {}
+	constructor(
+		private readonly filePath: string,
+		private readonly content = "written",
+	) {}
 
-	async *stream(_request: ModelRequest): AsyncGenerator<ModelStreamEvent> {
+	async *stream(request: ModelRequest): AsyncGenerator<ModelStreamEvent> {
+		if (request.messages[0]?.content.includes("select cagent memory files")) {
+			yield {
+				type: "text_delta",
+				content: JSON.stringify({ selected_memories: [] }),
+			};
+			return;
+		}
 		this.callCount++;
 		if (this.callCount === 1) {
 			yield {
@@ -153,7 +176,7 @@ class WritePathModelClient implements ModelClient {
 				name: "Write",
 				arguments: JSON.stringify({
 					file_path: this.filePath,
-					content: "written",
+					content: this.content,
 				}),
 			};
 			return;
@@ -262,6 +285,92 @@ test("normal mode write policy denies configured paths", async () => {
 	}
 });
 
+test("an unsafe memory directory does not block unrelated normal writes", async () => {
+	const cwd = await makeTempDir();
+	try {
+		const outsideMemory = join(cwd, "outside-memory");
+		await mkdir(join(cwd, ".cagent"), { recursive: true });
+		await mkdir(outsideMemory, { recursive: true });
+		await symlink(
+			outsideMemory,
+			getMemoryDir(cwd),
+			process.platform === "win32" ? "junction" : "dir",
+		);
+		const normalPath = join(cwd, "normal.txt");
+		let terminal: Terminal | undefined;
+		for await (const event of query({
+			initialState: createInitialState("write normal file", cwd),
+			model: new WritePathModelClient(normalPath, "normal content"),
+			tools: [writeTool],
+		})) {
+			if (event.type === "terminal") {
+				terminal = event.terminal;
+			}
+		}
+
+		expect(terminal?.state.observations[0]?.ok).toBe(true);
+		expect(await readFile(normalPath, "utf8")).toBe("normal content");
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("write policy applies to a directory alias final memory target", async () => {
+	const cwd = await makeTempDir();
+	try {
+		await ensureMemoryStore(cwd);
+		const aliasPath = join(cwd, "memory-policy-alias");
+		await symlink(
+			getMemoryDir(cwd),
+			aliasPath,
+			process.platform === "win32" ? "junction" : "dir",
+		);
+		const targetPath = join(aliasPath, "policy.md");
+		const content = [
+			"---",
+			"type: project",
+			"description: Policy protected memory",
+			"created_at: 2026-07-10T00:00:00.000Z",
+			"updated_at: 2026-07-10T00:00:00.000Z",
+			"source: user",
+			"confidence: high",
+			"stability: evolving",
+			"---",
+			"",
+			"Must remain denied.",
+		].join("\n");
+		const initialState = {
+			...createInitialState("write through memory alias", cwd),
+			toolPermissionContext: createToolPermissionContext(cwd, {
+				writePolicy: {
+					allow: [cwd],
+					deny: [getMemoryDir(cwd)],
+				},
+			}),
+		};
+		let terminal: Terminal | undefined;
+		for await (const event of query({
+			initialState,
+			model: new WritePathModelClient(targetPath, content),
+			tools: [writeTool],
+		})) {
+			if (event.type === "terminal") {
+				terminal = event.terminal;
+			}
+		}
+
+		expect(terminal?.state.observations[0]?.ok).toBe(false);
+		expect(terminal?.state.observations[0]?.output).toContain(
+			"denied by write policy",
+		);
+		await expect(
+			access(join(getMemoryDir(cwd), "policy.md")),
+		).rejects.toThrow();
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
 test("memory agent write permissions are restricted to .cagent/memory", async () => {
 	const cwd = await makeTempDir();
 	try {
@@ -290,6 +399,216 @@ test("memory agent write permissions are restricted to .cagent/memory", async ()
 			"Memory sub agent can only write files under .cagent/memory",
 		);
 		await expect(access(outsidePath)).rejects.toThrow();
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("authorized relative write paths are normalized against the agent cwd", async () => {
+	const cwd = await makeTempDir();
+	try {
+		await ensureMemoryStore(cwd);
+		let receivedPath = "";
+		const capturingWriteTool: Tool<
+			{ file_path: string; content: string },
+			{ bytesWritten: number }
+		> = {
+			...writeTool,
+			async call({ file_path, content }) {
+				receivedPath = file_path;
+				return { bytesWritten: Buffer.byteLength(content) };
+			},
+		};
+		const initialState = {
+			...createInitialState("write relative memory", cwd),
+			toolPermissionContext: createToolPermissionContext(cwd, {
+				agentType: "memory",
+			}),
+		};
+		for await (const _event of query({
+			initialState,
+			model: new WritePathModelClient(".cagent/memory/relative.md"),
+			tools: [capturingWriteTool],
+		})) {
+			// Drain the query.
+		}
+
+		expect(receivedPath).toBe(join(cwd, ".cagent", "memory", "relative.md"));
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("main agent writes inside memory use the strict memory validator", async () => {
+	const cwd = await makeTempDir();
+	try {
+		await ensureMemoryStore(cwd);
+		const invalidPath = join(cwd, ".cagent", "memory", "invalid.md");
+		let terminal: Terminal | undefined;
+		for await (const event of query({
+			initialState: createInitialState("write invalid memory", cwd),
+			model: new WritePathModelClient(invalidPath),
+			tools: [writeTool],
+		})) {
+			if (event.type === "terminal") {
+				terminal = event.terminal;
+			}
+		}
+
+		expect(terminal?.state.observations[0]?.ok).toBe(false);
+		expect(terminal?.state.observations[0]?.output).toContain(
+			"Invalid memory file",
+		);
+		await expect(access(invalidPath)).rejects.toThrow();
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("main agent cannot bypass memory validation through a directory alias", async () => {
+	const cwd = await makeTempDir();
+	try {
+		await ensureMemoryStore(cwd);
+		const aliasPath = join(cwd, "memory-alias");
+		await symlink(
+			getMemoryDir(cwd),
+			aliasPath,
+			process.platform === "win32" ? "junction" : "dir",
+		);
+		const invalidPath = join(aliasPath, "invalid.md");
+		let terminal: Terminal | undefined;
+		for await (const event of query({
+			initialState: createInitialState("write invalid aliased memory", cwd),
+			model: new WritePathModelClient(invalidPath),
+			tools: [writeTool],
+		})) {
+			if (event.type === "terminal") {
+				terminal = event.terminal;
+			}
+		}
+
+		expect(terminal?.state.observations[0]?.ok).toBe(false);
+		expect(terminal?.state.observations[0]?.output).toContain(
+			"Invalid memory file",
+		);
+		await expect(
+			access(join(getMemoryDir(cwd), "invalid.md")),
+		).rejects.toThrow();
+
+		const originalIndex = await readFile(getMemoryIndexPath(cwd), "utf8");
+		terminal = undefined;
+		for await (const event of query({
+			initialState: createInitialState("overwrite aliased memory index", cwd),
+			model: new WritePathModelClient(join(aliasPath, "memory.md")),
+			tools: [writeTool],
+		})) {
+			if (event.type === "terminal") {
+				terminal = event.terminal;
+			}
+		}
+
+		expect(terminal?.state.observations[0]?.ok).toBe(false);
+		expect(terminal?.state.observations[0]?.output).toContain(
+			"MEMORY.md is managed automatically",
+		);
+		expect(await readFile(getMemoryIndexPath(cwd), "utf8")).toBe(originalIndex);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("main agent cannot bypass memory validation through outside hardlinks", async () => {
+	const cwd = await makeTempDir();
+	try {
+		await ensureMemoryStore(cwd);
+		const topicPath = join(getMemoryDir(cwd), "topic.md");
+		const topicContent = [
+			"---",
+			"type: project",
+			"description: Existing topic",
+			"created_at: 2026-07-09T00:00:00.000Z",
+			"updated_at: 2026-07-09T00:00:00.000Z",
+			"source: user",
+			"confidence: high",
+			"stability: evolving",
+			"---",
+			"",
+			"Original topic content.",
+		].join("\n");
+		await writeFile(topicPath, topicContent);
+		const outsideTopicLink = join(cwd, "outside-topic.md");
+		await link(topicPath, outsideTopicLink);
+
+		let terminal: Terminal | undefined;
+		for await (const event of query({
+			initialState: createInitialState("overwrite hardlinked topic", cwd),
+			model: new WritePathModelClient(outsideTopicLink, "INVALID_TOPIC"),
+			tools: [writeTool],
+		})) {
+			if (event.type === "terminal") {
+				terminal = event.terminal;
+			}
+		}
+		expect(terminal?.state.observations[0]?.ok).toBe(false);
+		expect(await readFile(topicPath, "utf8")).toBe(topicContent);
+
+		const indexPath = getMemoryIndexPath(cwd);
+		const originalIndex = await readFile(indexPath, "utf8");
+		const outsideIndexLink = join(cwd, "outside-index.md");
+		await link(indexPath, outsideIndexLink);
+		terminal = undefined;
+		for await (const event of query({
+			initialState: createInitialState("overwrite hardlinked index", cwd),
+			model: new WritePathModelClient(outsideIndexLink, "PWNED_INDEX"),
+			tools: [writeTool],
+		})) {
+			if (event.type === "terminal") {
+				terminal = event.terminal;
+			}
+		}
+		expect(terminal?.state.observations[0]?.ok).toBe(false);
+		expect(terminal?.state.observations[0]?.output).toContain(
+			"MEMORY.md is managed automatically",
+		);
+		expect(await readFile(indexPath, "utf8")).toBe(originalIndex);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("valid main agent memory writes refresh MEMORY.md automatically", async () => {
+	const cwd = await makeTempDir();
+	try {
+		await ensureMemoryStore(cwd);
+		const memoryPath = join(cwd, ".cagent", "memory", "preference.md");
+		const content = [
+			"---",
+			"type: feedback",
+			"description: User prefers concise answers",
+			"created_at: 2026-07-09T00:00:00.000Z",
+			"updated_at: 2026-07-09T00:00:00.000Z",
+			"source: user",
+			"confidence: high",
+			"stability: evolving",
+			"---",
+			"",
+			"Keep answers concise.",
+		].join("\n");
+		let terminal: Terminal | undefined;
+		for await (const event of query({
+			initialState: createInitialState("remember preference", cwd),
+			model: new WritePathModelClient(memoryPath, content),
+			tools: [writeTool],
+		})) {
+			if (event.type === "terminal") {
+				terminal = event.terminal;
+			}
+		}
+
+		expect(terminal?.state.observations[0]?.ok).toBe(true);
+		expect(await readFile(getMemoryIndexPath(cwd), "utf8")).toContain(
+			"[User prefers concise answers](preference.md)",
+		);
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}

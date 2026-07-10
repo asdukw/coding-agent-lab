@@ -45,7 +45,7 @@ export async function runToolCall({
 			string,
 			unknown
 		>;
-		authorizeToolCall(context.getState(), tool, args);
+		await authorizeToolCall(context.getState(), tool, args);
 		const result = await tool.call(args, toolContext(context));
 		output = JSON.stringify(result);
 	} catch (caught) {

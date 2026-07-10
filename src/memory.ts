@@ -1,6 +1,21 @@
+import { Database } from "bun:sqlite";
+import { randomUUID } from "node:crypto";
 import type { Dirent } from "node:fs";
-import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
-import { join, relative } from "node:path";
+import {
+	mkdir,
+	open,
+	readdir,
+	rename,
+	rm,
+	stat,
+	writeFile,
+} from "node:fs/promises";
+import { basename, dirname, join, relative, resolve } from "node:path";
+import {
+	isPathInside,
+	resolveContainedWritePath,
+	resolveRealPathForWrite,
+} from "./pathSafety";
 import type { Message } from "./state";
 
 export const MEMORY_DIR_NAME = "memory";
@@ -11,9 +26,24 @@ const MAX_MEMORY_INDEX_LINES = 200;
 const MAX_MEMORY_INDEX_BYTES = 25_000;
 const MAX_MEMORY_FILES = 200;
 const FRONTMATTER_MAX_LINES = 40;
+const FRONTMATTER_MAX_BYTES = 16_000;
+export const MAX_MEMORY_TOPIC_BYTES = 256_000;
 const MAX_RELEVANT_MEMORY_FILES = 5;
 const MAX_RELEVANT_MEMORY_LINES = 200;
 const MAX_RELEVANT_MEMORY_BYTES = 20_000;
+const MEMORY_MUTATION_LOCK_NAME = ".mutation-lock.sqlite";
+const MEMORY_MUTATION_LOCK_TIMEOUT_MS = 10_000;
+const memoryMutationTails = new Map<string, Promise<void>>();
+const MEMORY_FRONTMATTER_KEYS = new Set([
+	"type",
+	"description",
+	"created_at",
+	"updated_at",
+	"source",
+	"confidence",
+	"stability",
+	"ttl",
+]);
 
 export const MEMORY_TYPES = [
 	"user",
@@ -23,17 +53,24 @@ export const MEMORY_TYPES = [
 ] as const;
 export const MEMORY_CONFIDENCES = ["low", "medium", "high"] as const;
 export const MEMORY_STABILITIES = ["temporary", "evolving", "durable"] as const;
+export const MEMORY_SOURCES = [
+	"user",
+	"assistant",
+	"tool",
+	"inferred",
+] as const;
 
 export type MemoryType = (typeof MEMORY_TYPES)[number];
 export type MemoryConfidence = (typeof MEMORY_CONFIDENCES)[number];
 export type MemoryStability = (typeof MEMORY_STABILITIES)[number];
+export type MemorySource = (typeof MEMORY_SOURCES)[number];
 
 export type MemoryMetadata = {
 	type?: MemoryType;
 	description?: string;
 	createdAt?: string;
 	updatedAt?: string;
-	source?: string;
+	source?: MemorySource;
 	confidence?: MemoryConfidence;
 	stability?: MemoryStability;
 	ttl?: string;
@@ -42,6 +79,11 @@ export type MemoryMetadata = {
 export type MemoryValidationIssue = {
 	path: string;
 	message: string;
+};
+
+type ParsedMemoryFrontmatter = {
+	metadata: MemoryMetadata;
+	issues: MemoryValidationIssue[];
 };
 
 export type MemoryStoreInfo = {
@@ -54,6 +96,8 @@ export type MemoryHeader = {
 	filename: string;
 	filePath: string;
 	mtimeMs: number;
+	sizeBytes: number;
+	readFailure?: string;
 	metadata: MemoryMetadata;
 	validationIssues: MemoryValidationIssue[];
 };
@@ -77,7 +121,17 @@ export async function ensureMemoryStore(cwd: string): Promise<MemoryStoreInfo> {
 	const memoryDir = getMemoryDir(cwd);
 	const indexPath = getMemoryIndexPath(cwd);
 
+	await resolveContainedWritePath({
+		targetPath: memoryDir,
+		directoryPath: memoryDir,
+		boundaryPath: cwd,
+	});
 	await mkdir(memoryDir, { recursive: true });
+	await resolveContainedWritePath({
+		targetPath: indexPath,
+		directoryPath: memoryDir,
+		boundaryPath: cwd,
+	});
 	try {
 		await writeFile(indexPath, DEFAULT_MEMORY_INDEX_CONTENT, {
 			encoding: "utf-8",
@@ -99,18 +153,30 @@ export async function ensureMemoryStore(cwd: string): Promise<MemoryStoreInfo> {
 export async function refreshMemoryIndex(
 	cwd: string,
 ): Promise<MemoryStoreInfo> {
-	const memoryDir = getMemoryDir(cwd);
-	const indexPath = getMemoryIndexPath(cwd);
+	return withMemoryMutationLock(cwd, () => refreshMemoryIndexUnlocked(cwd));
+}
 
-	await mkdir(memoryDir, { recursive: true });
+async function refreshMemoryIndexUnlocked(
+	cwd: string,
+): Promise<MemoryStoreInfo> {
+	const store = await ensureMemoryStore(cwd);
+	const { memoryDir, indexPath } = store;
 	const files = await scanMemoryHeaders(
 		memoryDir,
 		await listMemoryFiles(memoryDir),
 	);
-	const topicFiles = files.filter(
-		(file) => file.filename !== MEMORY_ENTRYPOINT_NAME,
+	const topicFiles = files.filter((file) => !isMemoryIndexPath(file.filename));
+	const unreadable = topicFiles.find((file) => file.readFailure);
+	if (unreadable) {
+		throw new Error(
+			`Cannot refresh memory index because ${unreadable.filename} is unreadable: ${unreadable.readFailure}`,
+		);
+	}
+	await writeMemoryIndexAtomically(
+		cwd,
+		indexPath,
+		formatMemoryIndex(topicFiles),
 	);
-	await writeFile(indexPath, formatMemoryIndex(topicFiles), "utf-8");
 
 	return {
 		memoryDir,
@@ -123,15 +189,202 @@ export async function validateMemoryStore(
 	cwd: string,
 ): Promise<MemoryValidationIssue[]> {
 	const info = await ensureMemoryStore(cwd);
-	return info.files
-		.filter((file) => file.filename !== MEMORY_ENTRYPOINT_NAME)
-		.flatMap((file) => file.validationIssues);
+	const topicFiles = info.files.filter(
+		(file) => !isMemoryIndexPath(file.filename),
+	);
+	return [
+		...topicFiles.flatMap((file) => file.validationIssues),
+		...(await findDuplicateMemoryIssues(topicFiles)),
+	];
+}
+
+export async function validateMemoryWrite(
+	cwd: string,
+	path: string,
+	content: string,
+): Promise<MemoryValidationIssue[]> {
+	const issues = validateMemoryFile(path, content);
+	if (issues.length > 0 || isMemoryIndexPath(path)) {
+		return issues;
+	}
+
+	const parsed = parseFrontmatter(path, content);
+	const candidateDescription = normalizeDuplicateKey(
+		parsed.metadata.description ?? "",
+	);
+	const candidateBody = normalizeMemoryBody(content);
+	const candidatePath = await resolveRealPathForWrite(resolve(cwd, path));
+	const info = await ensureMemoryStore(cwd);
+	let replacesExistingFile = false;
+
+	for (const memory of info.files) {
+		if (isMemoryIndexPath(memory.filename)) {
+			continue;
+		}
+		if (
+			sameCanonicalPath(
+				await resolveRealPathForWrite(memory.filePath),
+				candidatePath,
+			)
+		) {
+			replacesExistingFile = true;
+			continue;
+		}
+		if (memory.readFailure) {
+			return [
+				{
+					path,
+					message: `cannot deduplicate against unreadable memory ${memory.filename}: ${memory.readFailure}`,
+				},
+			];
+		}
+		if (memory.sizeBytes > MAX_MEMORY_TOPIC_BYTES) {
+			return [
+				{
+					path,
+					message: `cannot deduplicate against oversized memory ${memory.filename}`,
+				},
+			];
+		}
+		if (
+			candidateDescription &&
+			normalizeDuplicateKey(memory.metadata.description ?? "") ===
+				candidateDescription
+		) {
+			return [
+				{
+					path,
+					message: `duplicates existing memory description in ${memory.filename}`,
+				},
+			];
+		}
+		if (candidateBody) {
+			const existing = await readMemoryBody(memory);
+			if (normalizeMemoryBody(existing) === candidateBody) {
+				return [
+					{
+						path,
+						message: `duplicates existing memory content in ${memory.filename}`,
+					},
+				];
+			}
+		}
+	}
+	if (!replacesExistingFile && info.files.length >= MAX_MEMORY_FILES) {
+		return [
+			{
+				path,
+				message: `memory store has reached its ${MAX_MEMORY_FILES}-file limit`,
+			},
+		];
+	}
+
+	return [];
+}
+
+export async function resolveMemoryWriteTarget(
+	cwd: string,
+	path: string,
+): Promise<string | undefined> {
+	const targetPath = resolve(cwd, path);
+	const memoryDir = getMemoryDir(cwd);
+
+	if (isPathInside(targetPath, memoryDir)) {
+		const safeTarget = await resolveContainedWritePath({
+			targetPath,
+			directoryPath: memoryDir,
+			boundaryPath: cwd,
+		});
+		const canonicalTarget = await resolveRealPathForWrite(safeTarget);
+		return canonicalTarget;
+	}
+
+	const [realCwd, realMemoryDir, realTarget] = await Promise.all([
+		resolveRealPathForWrite(cwd),
+		resolveRealPathForWrite(memoryDir),
+		resolveRealPathForWrite(targetPath),
+	]);
+	if (!isPathInside(realMemoryDir, realCwd)) {
+		if (isPathInside(realTarget, realMemoryDir)) {
+			throw new Error(`Memory directory escapes the workspace: ${memoryDir}`);
+		}
+		return undefined;
+	}
+	if (isPathInside(realTarget, realMemoryDir)) {
+		return resolveContainedWritePath({
+			targetPath: realTarget,
+			directoryPath: realMemoryDir,
+			boundaryPath: realCwd,
+		});
+	}
+
+	const hardlinkedMemoryTarget = await findHardlinkedMemoryTarget(
+		realMemoryDir,
+		realTarget,
+	);
+	if (!hardlinkedMemoryTarget) {
+		return undefined;
+	}
+	return resolveContainedWritePath({
+		targetPath: hardlinkedMemoryTarget,
+		directoryPath: realMemoryDir,
+		boundaryPath: realCwd,
+	});
+}
+
+export async function writeValidatedMemoryFile(
+	cwd: string,
+	path: string,
+	content: string,
+): Promise<number> {
+	return withMemoryMutationLock(cwd, async () => {
+		const targetPath = await resolveMemoryWriteTarget(cwd, path);
+		if (!targetPath) {
+			throw new Error(`Path is outside the memory directory: ${path}`);
+		}
+		if (isMemoryIndexPath(targetPath)) {
+			throw new Error("MEMORY.md is managed automatically after extraction");
+		}
+		const issues = await validateMemoryWrite(cwd, targetPath, content);
+		if (issues.length > 0) {
+			throw new Error(
+				`Invalid memory file: ${issues.map((issue) => issue.message).join("; ")}`,
+			);
+		}
+
+		await replaceMemoryFileAtomically(cwd, targetPath, content);
+		await refreshMemoryIndexUnlocked(cwd);
+		return Buffer.byteLength(content, "utf-8");
+	});
+}
+
+export async function readMemoryFileForEdit(
+	cwd: string,
+	path: string,
+): Promise<{ targetPath: string; content: string } | undefined> {
+	const targetPath = await resolveMemoryWriteTarget(cwd, path);
+	if (!targetPath) {
+		return undefined;
+	}
+	if (isMemoryIndexPath(targetPath)) {
+		throw new Error("MEMORY.md is managed automatically after extraction");
+	}
+	const result = await readTextPrefix(targetPath, MAX_MEMORY_TOPIC_BYTES);
+	if (result.truncated) {
+		throw new Error(
+			`Memory topic files must not exceed ${MAX_MEMORY_TOPIC_BYTES} bytes`,
+		);
+	}
+	return { targetPath, content: result.content };
 }
 
 export async function loadMemoryPrompt(cwd: string): Promise<string> {
 	const info = await ensureMemoryStore(cwd);
-	const rawIndex = await readFile(info.indexPath, "utf-8");
-	const index = formatMemoryIndexForPrompt(rawIndex);
+	const rawIndex = await readTextPrefix(info.indexPath, MAX_MEMORY_INDEX_BYTES);
+	const formattedIndex = formatMemoryIndexForPrompt(rawIndex.content);
+	const index = rawIndex.truncated
+		? `${formattedIndex}\n\n> MEMORY.md was truncated for prompt size. Read the file directly if more detail is needed.`
+		: formattedIndex;
 
 	return [
 		"# cagent memory",
@@ -148,7 +401,8 @@ export async function loadMemoryPrompt(cwd: string): Promise<string> {
 		"Do not save ephemeral task state, TODOs, plan details, raw session summaries, git history, or code facts that can be derived from the repository.",
 		"",
 		"When the user explicitly asks you to remember or forget something, update the memory store immediately if current mode permissions allow file writes.",
-		"Write memories as focused markdown topic files under the memory directory. Keep MEMORY.md as a short one-line index of those files.",
+		"Write memories as focused markdown topic files under the memory directory.",
+		"Do not edit MEMORY.md directly; it is regenerated automatically from topic files.",
 		"",
 		"Every topic file must start with YAML frontmatter:",
 		"```yaml",
@@ -193,7 +447,7 @@ export function formatMemoryStoreSummary(info: MemoryStoreInfo): string {
 export async function scanMemoryFiles(cwd: string): Promise<MemoryHeader[]> {
 	const info = await ensureMemoryStore(cwd);
 	return info.files
-		.filter((file) => file.filename !== MEMORY_ENTRYPOINT_NAME)
+		.filter((file) => !isMemoryIndexPath(file.filename))
 		.filter((file) => !isMemoryExpired(file.metadata))
 		.sort((a, b) => b.mtimeMs - a.mtimeMs);
 }
@@ -220,13 +474,29 @@ export function validateMemoryFile(
 	path: string,
 	content: string,
 ): MemoryValidationIssue[] {
-	if (path.replace(/\\/g, "/").endsWith(`/${MEMORY_ENTRYPOINT_NAME}`)) {
+	if (isMemoryIndexPath(path)) {
 		return [];
 	}
-	if (path === MEMORY_ENTRYPOINT_NAME) {
-		return [];
+	if (!path.replace(/\\/g, "/").toLowerCase().endsWith(".md")) {
+		return [{ path, message: "memory topic files must use the .md extension" }];
 	}
-	return validateMemoryMetadata(path, parseFrontmatter(content));
+	const issues: MemoryValidationIssue[] = [];
+	if (Buffer.byteLength(content, "utf-8") > MAX_MEMORY_TOPIC_BYTES) {
+		issues.push({
+			path,
+			message: `memory topic files must not exceed ${MAX_MEMORY_TOPIC_BYTES} bytes`,
+		});
+	}
+	const headerText = truncateUtf8String(content, FRONTMATTER_MAX_BYTES)
+		.split("\n")
+		.slice(0, FRONTMATTER_MAX_LINES)
+		.join("\n");
+	const parsed = parseFrontmatter(path, headerText);
+	return [
+		...issues,
+		...parsed.issues,
+		...validateMemoryMetadata(path, parsed.metadata),
+	];
 }
 
 export function validateMemoryMetadata(
@@ -239,6 +509,18 @@ export function validateMemoryMetadata(
 	}
 	if (!metadata.description) {
 		issues.push({ path, message: "missing description" });
+	}
+	if (!metadata.createdAt) {
+		issues.push({ path, message: "missing created_at" });
+	}
+	if (!metadata.updatedAt) {
+		issues.push({ path, message: "missing updated_at" });
+	}
+	if (!metadata.source) {
+		issues.push({ path, message: "missing source" });
+	}
+	if (!metadata.confidence) {
+		issues.push({ path, message: "missing confidence" });
 	}
 	if (!metadata.stability) {
 		issues.push({ path, message: "missing stability" });
@@ -326,13 +608,16 @@ export async function readRelevantMemories(
 				throw new Error(`unknown memory: ${filename}`);
 			}
 
-			const raw = await readFile(memory.filePath, "utf-8");
-			const formatted = truncateMemoryContent(raw);
+			const raw = await readTextPrefix(
+				memory.filePath,
+				MAX_RELEVANT_MEMORY_BYTES,
+			);
+			const formatted = truncateMemoryContent(raw.content);
 			return {
 				path: memory.filename,
 				content: formatted.content,
 				mtimeMs: memory.mtimeMs,
-				truncated: formatted.truncated,
+				truncated: raw.truncated || formatted.truncated,
 			};
 		}),
 	);
@@ -376,96 +661,221 @@ async function listMemoryFiles(memoryDir: string): Promise<string[]> {
 	const files: string[] = [];
 
 	async function walk(dir: string): Promise<void> {
-		let entries: Dirent[];
-		try {
-			entries = await readdir(dir, { withFileTypes: true });
-		} catch {
-			return;
-		}
+		const entries: Dirent[] = await readdir(dir, { withFileTypes: true });
 
 		for (const entry of entries) {
-			if (entry.name.startsWith(".")) {
-				continue;
-			}
-
 			const fullPath = join(dir, entry.name);
 			if (entry.isDirectory()) {
 				await walk(fullPath);
-			} else if (entry.isFile() && entry.name.endsWith(".md")) {
+			} else if (entry.isFile() && entry.name.toLowerCase().endsWith(".md")) {
 				files.push(relative(memoryDir, fullPath).replace(/\\/g, "/"));
 			}
 		}
 	}
 
 	await walk(memoryDir);
+	if (files.length > MAX_MEMORY_FILES) {
+		throw new Error(
+			`memory store contains ${files.length} markdown files; limit is ${MAX_MEMORY_FILES}`,
+		);
+	}
 	return files.sort((a, b) => {
-		if (a === MEMORY_ENTRYPOINT_NAME) {
+		if (isMemoryIndexPath(a)) {
 			return -1;
 		}
-		if (b === MEMORY_ENTRYPOINT_NAME) {
+		if (isMemoryIndexPath(b)) {
 			return 1;
 		}
 		return a.localeCompare(b);
 	});
 }
 
+async function findHardlinkedMemoryTarget(
+	memoryDir: string,
+	targetPath: string,
+): Promise<string | undefined> {
+	let targetStat: Awaited<ReturnType<typeof stat>>;
+	try {
+		targetStat = await stat(targetPath, { bigint: true });
+	} catch (caught) {
+		if (hasErrnoCode(caught, "ENOENT") || hasErrnoCode(caught, "ENOTDIR")) {
+			return undefined;
+		}
+		throw caught;
+	}
+	if (!targetStat.isFile() || targetStat.nlink < 2n) {
+		return undefined;
+	}
+	if (targetStat.ino === 0n) {
+		throw new Error(
+			`Cannot safely classify hardlinked write target with no file identity: ${targetPath}`,
+		);
+	}
+
+	let memoryFiles: string[];
+	try {
+		memoryFiles = await listMemoryFiles(memoryDir);
+	} catch (caught) {
+		if (hasErrnoCode(caught, "ENOENT") || hasErrnoCode(caught, "ENOTDIR")) {
+			return undefined;
+		}
+		throw caught;
+	}
+	for (const filename of memoryFiles) {
+		const memoryPath = join(memoryDir, filename);
+		const memoryStat = await stat(memoryPath, { bigint: true });
+		if (
+			memoryStat.dev === targetStat.dev &&
+			memoryStat.ino === targetStat.ino
+		) {
+			return resolveRealPathForWrite(memoryPath);
+		}
+	}
+	return undefined;
+}
+
 async function scanMemoryHeaders(
 	memoryDir: string,
 	files: string[],
 ): Promise<MemoryHeader[]> {
+	const selectedFiles = files.slice(0, MAX_MEMORY_FILES);
 	const results = await Promise.allSettled(
-		files.slice(0, MAX_MEMORY_FILES).map(async (filename) => {
+		selectedFiles.map(async (filename) => {
 			const filePath = join(memoryDir, filename);
-			const [headerText, fileStat] = await Promise.all([
-				readFile(filePath, "utf-8").then((text) =>
-					text.split("\n").slice(0, FRONTMATTER_MAX_LINES).join("\n"),
-				),
+			const [header, fileStat] = await Promise.all([
+				readTextPrefix(filePath, FRONTMATTER_MAX_BYTES),
 				stat(filePath),
 			]);
-			const metadata = parseFrontmatter(headerText);
+			const headerText = header.content
+				.split("\n")
+				.slice(0, FRONTMATTER_MAX_LINES)
+				.join("\n");
+			const parsed = parseFrontmatter(filename, headerText);
+			const sizeIssues: MemoryValidationIssue[] =
+				fileStat.size > MAX_MEMORY_TOPIC_BYTES && !isMemoryIndexPath(filename)
+					? [
+							{
+								path: filename,
+								message: `memory topic files must not exceed ${MAX_MEMORY_TOPIC_BYTES} bytes`,
+							},
+						]
+					: [];
 			return {
 				filename,
 				filePath,
 				mtimeMs: fileStat.mtimeMs,
-				metadata,
-				validationIssues: validateMemoryMetadataForFilename(filename, metadata),
+				sizeBytes: fileStat.size,
+				metadata: parsed.metadata,
+				validationIssues: isMemoryIndexPath(filename)
+					? []
+					: [
+							...sizeIssues,
+							...parsed.issues,
+							...validateMemoryMetadata(filename, parsed.metadata),
+						],
 			};
 		}),
 	);
 
-	return results
-		.filter((result): result is PromiseFulfilledResult<MemoryHeader> => {
-			return result.status === "fulfilled";
-		})
-		.map((result) => result.value);
+	return results.map((result, index) => {
+		if (result.status === "fulfilled") {
+			return result.value;
+		}
+		const filename = selectedFiles[index] ?? "unknown";
+		return {
+			filename,
+			filePath: join(memoryDir, filename),
+			mtimeMs: 0,
+			sizeBytes: 0,
+			readFailure: formatCaught(result.reason),
+			metadata: {},
+			validationIssues: [
+				{
+					path: filename,
+					message: `failed to read memory file: ${formatCaught(result.reason)}`,
+				},
+			],
+		};
+	});
 }
 
-function parseFrontmatter(content: string): MemoryMetadata {
+function parseFrontmatter(
+	path: string,
+	content: string,
+): ParsedMemoryFrontmatter {
 	const lines = content.split("\n");
 	if (lines[0]?.trim() !== "---") {
-		return {};
+		return {
+			metadata: {},
+			issues: [{ path, message: "missing opening frontmatter delimiter" }],
+		};
 	}
 
 	const frontmatter: Record<string, string> = {};
-	for (const line of lines.slice(1)) {
+	const issues: MemoryValidationIssue[] = [];
+	let closed = false;
+	for (const [index, line] of lines.slice(1).entries()) {
 		if (line.trim() === "---") {
+			closed = true;
 			break;
 		}
 		const match = /^([A-Za-z0-9_-]+):\s*(.*)$/.exec(line);
 		if (!match) {
+			if (line.trim() && !line.trim().startsWith("#")) {
+				issues.push({
+					path,
+					message: `invalid frontmatter syntax on line ${index + 2}`,
+				});
+			}
 			continue;
 		}
 		const [, key, rawValue] = match;
 		if (!key || rawValue === undefined) {
 			continue;
 		}
+		if (!MEMORY_FRONTMATTER_KEYS.has(key)) {
+			issues.push({ path, message: `unknown frontmatter key: ${key}` });
+			continue;
+		}
+		if (Object.hasOwn(frontmatter, key)) {
+			issues.push({ path, message: `duplicate frontmatter key: ${key}` });
+			continue;
+		}
 		frontmatter[key] = rawValue.trim().replace(/^["']|["']$/g, "");
+	}
+	if (!closed) {
+		issues.push({ path, message: "missing closing frontmatter delimiter" });
 	}
 
 	const metadata: MemoryMetadata = {};
 	const type = parseMemoryType(frontmatter.type);
 	const confidence = parseMemoryConfidence(frontmatter.confidence);
 	const stability = parseMemoryStability(frontmatter.stability);
+	const source = parseMemorySource(frontmatter.source);
+	if (frontmatter.type && !type) {
+		issues.push({
+			path,
+			message: `type must be one of: ${MEMORY_TYPES.join(", ")}`,
+		});
+	}
+	if (frontmatter.confidence && !confidence) {
+		issues.push({
+			path,
+			message: `confidence must be one of: ${MEMORY_CONFIDENCES.join(", ")}`,
+		});
+	}
+	if (frontmatter.stability && !stability) {
+		issues.push({
+			path,
+			message: `stability must be one of: ${MEMORY_STABILITIES.join(", ")}`,
+		});
+	}
+	if (frontmatter.source && !source) {
+		issues.push({
+			path,
+			message: `source must be one of: ${MEMORY_SOURCES.join(", ")}`,
+		});
+	}
 	if (type) {
 		metadata.type = type;
 	}
@@ -478,8 +888,8 @@ function parseFrontmatter(content: string): MemoryMetadata {
 	if (frontmatter.updated_at) {
 		metadata.updatedAt = frontmatter.updated_at;
 	}
-	if (frontmatter.source) {
-		metadata.source = frontmatter.source;
+	if (source) {
+		metadata.source = source;
 	}
 	if (confidence) {
 		metadata.confidence = confidence;
@@ -490,21 +900,11 @@ function parseFrontmatter(content: string): MemoryMetadata {
 	if (frontmatter.ttl) {
 		metadata.ttl = frontmatter.ttl;
 	}
-	return metadata;
-}
-
-function validateMemoryMetadataForFilename(
-	filename: string,
-	metadata: MemoryMetadata,
-): MemoryValidationIssue[] {
-	if (filename === MEMORY_ENTRYPOINT_NAME) {
-		return [];
-	}
-	return validateMemoryMetadata(filename, metadata);
+	return { metadata, issues };
 }
 
 function formatMemoryFileSummary(memory: MemoryHeader): string {
-	if (memory.filename === MEMORY_ENTRYPOINT_NAME) {
+	if (isMemoryIndexPath(memory.filename)) {
 		return `${memory.filename} (index)`;
 	}
 
@@ -540,9 +940,318 @@ function formatMemoryIndex(memories: MemoryHeader[]): string {
 				: undefined,
 		].filter(Boolean);
 		const suffix = details.length ? ` (${details.join(", ")})` : "";
-		return `- [${description}](${memory.filename})${suffix}`;
+		return `- [${escapeMarkdownLabel(description)}](${encodeMemoryLinkPath(memory.filename)})${suffix}`;
 	});
 	return `# Memory\n\n${lines.join("\n")}\n`;
+}
+
+async function writeMemoryIndexAtomically(
+	cwd: string,
+	indexPath: string,
+	content: string,
+): Promise<void> {
+	await replaceMemoryFileAtomically(cwd, indexPath, content);
+}
+
+async function replaceMemoryFileAtomically(
+	cwd: string,
+	targetPath: string,
+	content: string,
+): Promise<void> {
+	const [realCwd, memoryDir, resolvedTarget] = await Promise.all([
+		resolveRealPathForWrite(cwd),
+		resolveRealPathForWrite(getMemoryDir(cwd)),
+		resolveRealPathForWrite(targetPath),
+	]);
+	const parentDir = dirname(resolvedTarget);
+	const tempPath = join(
+		parentDir,
+		`.${basename(resolvedTarget)}.${randomUUID()}.tmp`,
+	);
+	await resolveContainedWritePath({
+		targetPath: resolvedTarget,
+		directoryPath: memoryDir,
+		boundaryPath: realCwd,
+	});
+	await mkdir(parentDir, { recursive: true });
+	await resolveContainedWritePath({
+		targetPath: tempPath,
+		directoryPath: memoryDir,
+		boundaryPath: realCwd,
+	});
+
+	let tempHandle: Awaited<ReturnType<typeof open>> | undefined;
+	try {
+		tempHandle = await open(tempPath, "wx");
+		await assertOpenedMemoryTempFile(tempHandle, tempPath, memoryDir, realCwd);
+		await tempHandle.writeFile(content, "utf8");
+		await tempHandle.sync();
+		await assertOpenedMemoryTempFile(tempHandle, tempPath, memoryDir, realCwd);
+		await resolveContainedWritePath({
+			targetPath: resolvedTarget,
+			directoryPath: memoryDir,
+			boundaryPath: realCwd,
+		});
+		await resolveContainedWritePath({
+			targetPath: tempPath,
+			directoryPath: memoryDir,
+			boundaryPath: realCwd,
+		});
+		await tempHandle.close();
+		tempHandle = undefined;
+		await rename(tempPath, resolvedTarget);
+	} finally {
+		await tempHandle?.close().catch(() => undefined);
+		await rm(tempPath, { force: true }).catch(() => undefined);
+	}
+}
+
+async function assertOpenedMemoryTempFile(
+	handle: Awaited<ReturnType<typeof open>>,
+	tempPath: string,
+	memoryDir: string,
+	realCwd: string,
+): Promise<void> {
+	await resolveContainedWritePath({
+		targetPath: tempPath,
+		directoryPath: memoryDir,
+		boundaryPath: realCwd,
+	});
+	const [handleStat, pathStat] = await Promise.all([
+		handle.stat({ bigint: true }),
+		stat(tempPath, { bigint: true }),
+	]);
+	if (
+		handleStat.ino === 0n ||
+		handleStat.nlink !== 1n ||
+		handleStat.dev !== pathStat.dev ||
+		handleStat.ino !== pathStat.ino
+	) {
+		throw new Error(`Memory temporary file identity changed: ${tempPath}`);
+	}
+}
+
+async function findDuplicateMemoryIssues(
+	memories: MemoryHeader[],
+): Promise<MemoryValidationIssue[]> {
+	const issues: MemoryValidationIssue[] = [];
+	const descriptions = new Map<string, string>();
+	const bodies = new Map<string, string>();
+
+	for (const memory of memories) {
+		const description = normalizeDuplicateKey(
+			memory.metadata.description ?? "",
+		);
+		if (description) {
+			const existing = descriptions.get(description);
+			if (existing) {
+				issues.push({
+					path: memory.filename,
+					message: `duplicates existing memory description in ${existing}`,
+				});
+			} else {
+				descriptions.set(description, memory.filename);
+			}
+		}
+
+		if (memory.readFailure || memory.sizeBytes > MAX_MEMORY_TOPIC_BYTES) {
+			continue;
+		}
+		const raw = await readMemoryBody(memory);
+		const body = normalizeMemoryBody(raw);
+		if (body) {
+			const existing = bodies.get(body);
+			if (existing) {
+				issues.push({
+					path: memory.filename,
+					message: `duplicates existing memory content in ${existing}`,
+				});
+			} else {
+				bodies.set(body, memory.filename);
+			}
+		}
+	}
+
+	return issues;
+}
+
+function normalizeDuplicateKey(value: string): string {
+	return value.normalize("NFKC").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+async function readMemoryBody(memory: MemoryHeader): Promise<string> {
+	const result = await readTextPrefix(memory.filePath, MAX_MEMORY_TOPIC_BYTES);
+	if (result.truncated) {
+		throw new Error(
+			`Memory file grew beyond ${MAX_MEMORY_TOPIC_BYTES} bytes while reading: ${memory.filename}`,
+		);
+	}
+	return result.content;
+}
+
+async function readTextPrefix(
+	path: string,
+	maxBytes: number,
+): Promise<{ content: string; truncated: boolean }> {
+	const handle = await open(path, "r");
+	try {
+		const buffer = Buffer.allocUnsafe(maxBytes + 1);
+		const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+		const truncated = bytesRead > maxBytes;
+		const bytes = buffer.subarray(0, Math.min(bytesRead, maxBytes));
+		const content = new TextDecoder().decode(bytes, { stream: truncated });
+		return { content, truncated };
+	} finally {
+		await handle.close();
+	}
+}
+
+function truncateUtf8String(value: string, maxBytes: number): string {
+	if (Buffer.byteLength(value, "utf-8") <= maxBytes) {
+		return value;
+	}
+	let bytes = 0;
+	let truncated = "";
+	for (const character of value) {
+		const characterBytes = Buffer.byteLength(character, "utf-8");
+		if (bytes + characterBytes > maxBytes) {
+			break;
+		}
+		truncated += character;
+		bytes += characterBytes;
+	}
+	return truncated;
+}
+
+function normalizeMemoryBody(content: string): string {
+	const lines = content.replace(/\r\n/g, "\n").split("\n");
+	let body = content;
+	if (lines[0]?.trim() === "---") {
+		const closing = lines.slice(1).findIndex((line) => line.trim() === "---");
+		if (closing >= 0) {
+			body = lines.slice(closing + 2).join("\n");
+		}
+	}
+	return normalizeDuplicateKey(body);
+}
+
+function sameCanonicalPath(left: string, right: string): boolean {
+	const normalize = (path: string) =>
+		process.platform === "win32" ? resolve(path).toLowerCase() : resolve(path);
+	return normalize(left) === normalize(right);
+}
+
+async function withMemoryMutationLock<T>(
+	cwd: string,
+	operation: () => Promise<T>,
+): Promise<T> {
+	const canonicalCwd = await resolveRealPathForWrite(cwd);
+	const key =
+		process.platform === "win32" ? canonicalCwd.toLowerCase() : canonicalCwd;
+	const previous = memoryMutationTails.get(key) ?? Promise.resolve();
+	let release: () => void = () => undefined;
+	const current = new Promise<void>((resolveCurrent) => {
+		release = resolveCurrent;
+	});
+	const tail = previous.catch(() => undefined).then(() => current);
+	memoryMutationTails.set(key, tail);
+
+	await previous.catch(() => undefined);
+	let releaseFileLock: (() => Promise<void>) | undefined;
+	try {
+		releaseFileLock = await acquireMemoryMutationFileLock(cwd);
+		return await operation();
+	} finally {
+		try {
+			await releaseFileLock?.();
+		} finally {
+			release();
+			if (memoryMutationTails.get(key) === tail) {
+				memoryMutationTails.delete(key);
+			}
+		}
+	}
+}
+
+async function acquireMemoryMutationFileLock(
+	cwd: string,
+): Promise<() => Promise<void>> {
+	const memoryDir = getMemoryDir(cwd);
+	const lockPath = join(memoryDir, MEMORY_MUTATION_LOCK_NAME);
+	await resolveContainedWritePath({
+		targetPath: memoryDir,
+		directoryPath: memoryDir,
+		boundaryPath: cwd,
+	});
+	await mkdir(memoryDir, { recursive: true });
+	await resolveContainedWritePath({
+		targetPath: lockPath,
+		directoryPath: memoryDir,
+		boundaryPath: cwd,
+	});
+	const database = new Database(lockPath, { create: true, strict: true });
+	const startedAt = Date.now();
+
+	try {
+		database.exec("PRAGMA busy_timeout = 0");
+		const lockStat = await stat(lockPath, { bigint: true });
+		if (!lockStat.isFile() || lockStat.nlink !== 1n || lockStat.ino === 0n) {
+			throw new Error(
+				`Memory mutation database has an unsafe file identity: ${lockPath}`,
+			);
+		}
+
+		for (;;) {
+			try {
+				database.exec("BEGIN IMMEDIATE");
+				break;
+			} catch (caught) {
+				if (!isSqliteBusy(caught)) {
+					throw caught;
+				}
+				if (Date.now() - startedAt >= MEMORY_MUTATION_LOCK_TIMEOUT_MS) {
+					throw new Error(
+						`Timed out waiting for memory mutation lock: ${lockPath}`,
+					);
+				}
+				await delay(25 + Math.floor(Math.random() * 25));
+			}
+		}
+
+		return async () => {
+			try {
+				database.exec("COMMIT");
+			} catch (caught) {
+				try {
+					database.exec("ROLLBACK");
+				} catch {
+					// Preserve the original commit error.
+				}
+				throw caught;
+			} finally {
+				database.close();
+			}
+		};
+	} catch (caught) {
+		database.close();
+		throw caught;
+	}
+}
+
+function isSqliteBusy(caught: unknown): boolean {
+	return (
+		caught instanceof Error &&
+		"code" in caught &&
+		(caught as { code?: unknown }).code === "SQLITE_BUSY"
+	);
+}
+
+function delay(milliseconds: number): Promise<void> {
+	return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+}
+
+export function isMemoryIndexPath(path: string): boolean {
+	return basename(path).toLowerCase() === MEMORY_ENTRYPOINT_NAME.toLowerCase();
 }
 
 function parseMemoryType(value: string | undefined): MemoryType | undefined {
@@ -559,6 +1268,12 @@ function parseMemoryStability(
 	value: string | undefined,
 ): MemoryStability | undefined {
 	return MEMORY_STABILITIES.find((candidate) => candidate === value);
+}
+
+function parseMemorySource(
+	value: string | undefined,
+): MemorySource | undefined {
+	return MEMORY_SOURCES.find((candidate) => candidate === value);
 }
 
 function isIsoDate(value: string): boolean {
@@ -613,6 +1328,25 @@ function escapeAttribute(value: string): string {
 	return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
 }
 
+function escapeMarkdownLabel(value: string): string {
+	return value
+		.replace(/\\/g, "\\\\")
+		.replaceAll("[", "\\[")
+		.replaceAll("]", "\\]");
+}
+
+function encodeMemoryLinkPath(filename: string): string {
+	return filename
+		.split("/")
+		.map((segment) =>
+			encodeURIComponent(segment).replace(
+				/[!'()*]/g,
+				(character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+			),
+		)
+		.join("/");
+}
+
 function formatMemoryIndexForPrompt(raw: string): string {
 	const trimmed = raw.trim();
 	if (!trimmed || trimmed === DEFAULT_MEMORY_INDEX_CONTENT.trim()) {
@@ -651,4 +1385,8 @@ function hasErrnoCode(error: unknown, code: string): boolean {
 		"code" in error &&
 		(error as { code?: unknown }).code === code
 	);
+}
+
+function formatCaught(caught: unknown): string {
+	return caught instanceof Error ? caught.message : String(caught);
 }

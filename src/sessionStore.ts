@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
 	access,
 	appendFile,
@@ -6,6 +7,7 @@ import {
 	writeFile,
 } from "node:fs/promises";
 import { dirname, relative, resolve, sep } from "node:path";
+import { resolveContainedWritePath } from "./pathSafety";
 import {
 	type AgentState,
 	type BudgetState,
@@ -20,6 +22,15 @@ import { toToolSpecs } from "./tools/types";
 const SESSION_DIR = ".cagent/sessions";
 const SESSION_ID_PATTERN = /^[A-Za-z0-9._-]+$/;
 const SESSION_INDEX_FILE = "session_index.jsonl";
+const MEMORY_EXTRACTION_AUDIT_DIR = ".cagent/audit/memory-extraction";
+
+export type SessionMemoryExtractionResult = {
+	subAgentSessionId: string;
+	ok: boolean;
+	summary: string;
+	reason?: string;
+	reasons?: string[];
+};
 
 export type StoredSessionState = {
 	sessionId: string;
@@ -92,6 +103,8 @@ export type SessionEvent =
 				subAgentSessionId: string;
 				ok: boolean;
 				summary: string;
+				reason?: string;
+				reasons?: string[];
 			};
 	  };
 
@@ -204,11 +217,7 @@ export async function appendSessionState(
 export async function appendSessionMemoryExtraction(
 	cwd: string,
 	state: AgentState,
-	result: {
-		subAgentSessionId: string;
-		ok: boolean;
-		summary: string;
-	},
+	result: SessionMemoryExtractionResult,
 ): Promise<void> {
 	await ensureSessionStarted(cwd, state);
 	await appendSessionEvent(cwd, {
@@ -220,8 +229,59 @@ export async function appendSessionMemoryExtraction(
 			subAgentSessionId: result.subAgentSessionId,
 			ok: result.ok,
 			summary: result.summary,
+			reason: result.reason,
+			reasons: result.reasons,
 		},
 	});
+}
+
+export async function persistSessionMemoryExtraction(
+	cwd: string,
+	state: AgentState,
+	result: SessionMemoryExtractionResult,
+): Promise<void> {
+	try {
+		await appendSessionMemoryExtraction(cwd, state, result);
+	} catch (primaryError) {
+		const fallbackDir = getMemoryExtractionAuditDir(cwd);
+		const fallbackPath = resolve(
+			fallbackDir,
+			`${Date.now()}-${randomUUID()}.json`,
+		);
+		try {
+			await resolveContainedWritePath({
+				targetPath: fallbackDir,
+				directoryPath: fallbackDir,
+				boundaryPath: cwd,
+			});
+			await mkdir(fallbackDir, { recursive: true });
+			await resolveContainedWritePath({
+				targetPath: fallbackPath,
+				directoryPath: fallbackDir,
+				boundaryPath: cwd,
+			});
+			await writeFile(
+				fallbackPath,
+				JSON.stringify({
+					timestamp: new Date().toISOString(),
+					type: "memory_extraction_persistence_fallback",
+					sessionId: state.sessionId,
+					payload: result,
+					persistenceError: formatCaught(primaryError),
+				}),
+				{ encoding: "utf8", flag: "wx" },
+			);
+		} catch (fallbackError) {
+			throw new AggregateError(
+				[primaryError, fallbackError],
+				"memory extraction audit persistence failed",
+			);
+		}
+	}
+}
+
+export function getMemoryExtractionAuditDir(cwd: string): string {
+	return resolve(cwd, MEMORY_EXTRACTION_AUDIT_DIR);
 }
 
 export async function saveSession(
@@ -548,4 +608,8 @@ function isNotFoundError(caught: unknown): boolean {
 		"code" in caught &&
 		caught.code === "ENOENT"
 	);
+}
+
+function formatCaught(caught: unknown): string {
+	return caught instanceof Error ? caught.message : String(caught);
 }

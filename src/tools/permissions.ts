@@ -1,4 +1,10 @@
-import { isAbsolute, relative, resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
+import { isMemoryIndexPath, resolveMemoryWriteTarget } from "../memory";
+import {
+	isPathInside,
+	resolveContainedWritePath,
+	resolveRealPathForWrite,
+} from "../pathSafety";
 import type { AgentState } from "../state";
 import {
 	ENTER_PLAN_MODE_TOOL_NAME,
@@ -35,17 +41,17 @@ export function getToolsForMode(state: AgentState, tools: Tools): Tools {
 	});
 }
 
-export function authorizeToolCall(
+export async function authorizeToolCall(
 	state: AgentState,
 	tool: Tool,
 	args: Record<string, unknown>,
-): void {
+): Promise<void> {
 	if (state.toolPermissionContext.mode !== "plan") {
 		if (PLAN_ONLY_TOOL_NAMES.has(tool.name)) {
 			throw new Error(`${tool.name} can only be used in plan mode`);
 		}
 		if (GENERIC_WRITE_TOOL_NAMES.has(tool.name)) {
-			authorizeWriteToolCall(state, tool, args);
+			await authorizeWriteToolCall(state, tool, args);
 		}
 		return;
 	}
@@ -66,41 +72,58 @@ export function authorizeToolCall(
 	throw new Error(`${tool.name} is not allowed in plan mode`);
 }
 
-function authorizeWriteToolCall(
+async function authorizeWriteToolCall(
 	state: AgentState,
 	tool: Tool,
 	args: Record<string, unknown>,
-): void {
+): Promise<void> {
 	const filePath = args.file_path;
 	if (typeof filePath !== "string" || filePath.trim() === "") {
 		throw new Error(`${tool.name} requires a file_path for permission checks`);
 	}
 
-	const targetPath = resolvePath(state.cwd, filePath);
+	let targetPath = resolvePath(state.cwd, filePath);
 	if (state.toolPermissionContext.agentType === "memory") {
 		const memoryDir = resolve(state.cwd, ".cagent", "memory");
-		if (!isPathInside(targetPath, memoryDir)) {
+		try {
+			targetPath = await resolveContainedWritePath({
+				targetPath,
+				directoryPath: memoryDir,
+				boundaryPath: state.cwd,
+			});
+		} catch {
 			throw new Error(
 				"Memory sub agent can only write files under .cagent/memory",
 			);
 		}
+		if (isMemoryIndexPath(targetPath)) {
+			throw new Error("MEMORY.md is managed automatically after extraction");
+		}
 	}
 
+	args.file_path = targetPath;
 	const policy = state.toolPermissionContext.writePolicy;
 	if (!policy) {
 		return;
 	}
+	const canonicalTarget = await resolveRealPathForWrite(targetPath);
+	const memoryTarget = await resolveMemoryWriteTarget(state.cwd, targetPath);
+	const policyTargets = uniquePaths(
+		memoryTarget ? [canonicalTarget, memoryTarget] : [canonicalTarget],
+	);
 
-	const denied = policy.deny?.some((entry) =>
-		isPathInside(targetPath, resolvePath(state.cwd, entry)),
+	const deniedRoots = await resolvePolicyRoots(state.cwd, policy.deny ?? []);
+	const denied = policyTargets.some((candidate) =>
+		deniedRoots.some((root) => isPathInside(candidate, root)),
 	);
 	if (denied) {
 		throw new Error(`${tool.name} denied by write policy: ${filePath}`);
 	}
 
 	if (policy.allow && policy.allow.length > 0) {
-		const allowed = policy.allow.some((entry) =>
-			isPathInside(targetPath, resolvePath(state.cwd, entry)),
+		const allowedRoots = await resolvePolicyRoots(state.cwd, policy.allow);
+		const allowed = policyTargets.every((candidate) =>
+			allowedRoots.some((root) => isPathInside(candidate, root)),
 		);
 		if (!allowed) {
 			throw new Error(
@@ -110,13 +133,29 @@ function authorizeWriteToolCall(
 	}
 }
 
-function resolvePath(cwd: string, path: string): string {
-	return isAbsolute(path) ? resolve(path) : resolve(cwd, path);
+async function resolvePolicyRoots(
+	cwd: string,
+	entries: string[],
+): Promise<string[]> {
+	return Promise.all(
+		entries.map((entry) => resolveRealPathForWrite(resolvePath(cwd, entry))),
+	);
 }
 
-function isPathInside(targetPath: string, parentPath: string): boolean {
-	const child = resolve(targetPath);
-	const parent = resolve(parentPath);
-	const rel = relative(parent, child);
-	return rel === "" || (!!rel && !rel.startsWith("..") && !isAbsolute(rel));
+function uniquePaths(paths: string[]): string[] {
+	const normalize = (path: string) =>
+		process.platform === "win32" ? path.toLowerCase() : path;
+	const seen = new Set<string>();
+	return paths.filter((path) => {
+		const key = normalize(path);
+		if (seen.has(key)) {
+			return false;
+		}
+		seen.add(key);
+		return true;
+	});
+}
+
+function resolvePath(cwd: string, path: string): string {
+	return isAbsolute(path) ? resolve(path) : resolve(cwd, path);
 }

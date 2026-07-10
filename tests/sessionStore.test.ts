@@ -1,5 +1,13 @@
 import { expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+	mkdir,
+	mkdtemp,
+	readdir,
+	readFile,
+	rm,
+	symlink,
+	writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseCliArgs } from "../src/main";
@@ -8,9 +16,11 @@ import {
 	appendSessionMessage,
 	appendSessionState,
 	ensureSessionStarted,
+	getMemoryExtractionAuditDir,
 	getSessionIndexPath,
 	getSessionPath,
 	loadSession,
+	persistSessionMemoryExtraction,
 	saveSession,
 } from "../src/sessionStore";
 import { type AgentState, createInitialState } from "../src/state";
@@ -142,6 +152,63 @@ test("appendSessionMemoryExtraction records a lightweight background event", asy
 
 		const restored = await loadSession(cwd, "memory-event-1");
 		expect(restored.messages).toEqual([]);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("memory extraction audit falls back when the session event cannot be written", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "cagent-session-"));
+	try {
+		const state = createInitialState("hello", cwd, [], "memory-fallback-1");
+		await mkdir(getSessionPath(cwd, state.sessionId), { recursive: true });
+
+		await persistSessionMemoryExtraction(cwd, state, {
+			subAgentSessionId: "memory-fallback-1.memory.0",
+			ok: false,
+			reason: "tool_error",
+			summary: "write denied",
+		});
+
+		const auditDir = getMemoryExtractionAuditDir(cwd);
+		const auditFiles = await readdir(auditDir);
+		expect(auditFiles).toHaveLength(1);
+		const raw = await readFile(
+			join(auditDir, auditFiles[0] ?? "missing"),
+			"utf8",
+		);
+		expect(raw).toContain('"type":"memory_extraction_persistence_fallback"');
+		expect(raw).toContain('"reason":"tool_error"');
+		expect(raw).toContain('"summary":"write denied"');
+		expect(raw).toContain('"persistenceError"');
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("memory extraction audit fallback rejects a symlinked audit directory", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "cagent-session-"));
+	try {
+		const state = createInitialState("hello", cwd, [], "memory-fallback-link");
+		await mkdir(getSessionPath(cwd, state.sessionId), { recursive: true });
+		const outsideDir = join(cwd, "outside-audit");
+		await mkdir(outsideDir, { recursive: true });
+		await mkdir(join(cwd, ".cagent", "audit"), { recursive: true });
+		await symlink(
+			outsideDir,
+			getMemoryExtractionAuditDir(cwd),
+			process.platform === "win32" ? "junction" : "dir",
+		);
+
+		await expect(
+			persistSessionMemoryExtraction(cwd, state, {
+				subAgentSessionId: "memory-fallback-link.memory.0",
+				ok: false,
+				reason: "tool_error",
+				summary: "write denied",
+			}),
+		).rejects.toThrow("memory extraction audit persistence failed");
+		expect(await readdir(outsideDir)).toEqual([]);
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}

@@ -6,11 +6,11 @@ import { runMemoryExtractionSubAgent } from "../memoryExtract";
 import type { ModelClient } from "../model/client";
 import { query } from "../query";
 import {
-	appendSessionMemoryExtraction,
 	appendSessionMessage,
 	appendSessionState,
 	ensureSessionStarted,
 	loadSession,
+	persistSessionMemoryExtraction,
 } from "../sessionStore";
 import {
 	type AgentState,
@@ -130,10 +130,21 @@ export function App({
 								state: event.state,
 								model,
 							})
+								.catch((caught) => ({
+									subAgentSessionId: `${event.state.sessionId}.memory.${event.state.turn}`,
+									ok: false,
+									reason: "query_error",
+									reasons: ["query_error"],
+									summary: `memory extraction crashed: ${formatCaught(caught)}`,
+								}))
 								.then((result) =>
-									appendSessionMemoryExtraction(cwd, event.state, result),
+									persistSessionMemoryExtraction(cwd, event.state, result),
 								)
-								.catch(() => undefined);
+								.catch((caught) => {
+									process.stderr.write(
+										`memory extraction audit persistence failed: ${formatCaught(caught)}\n`,
+									);
+								});
 						} else if (event.type === "terminal") {
 							if (!statePersisted) {
 								await appendSessionState(cwd, event.terminal.state);
@@ -352,6 +363,10 @@ export function App({
 			) : null}
 		</Box>
 	);
+}
+
+function formatCaught(caught: unknown): string {
+	return caught instanceof Error ? caught.message : String(caught);
 }
 
 function parsePlanApprovalInput(
