@@ -29,7 +29,3 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 # editors / OS
 .idea/
 .DS_Store
-
-# GitNexus tool-installed skills
-.claude/skills/gitnexus/
-.cagent/
