@@ -1,6 +1,6 @@
 import { Box, Text } from "ink";
 import TextInput from "ink-text-input";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ensureMemoryStore, formatMemoryStoreSummary } from "../memory";
 import { runMemoryExtractionSubAgent } from "../memoryExtract";
 import type { ModelClient } from "../model/client";
@@ -20,7 +20,7 @@ import {
 	resolvePlanApproval,
 } from "../state";
 import { BUILTIN_TOOLS } from "../tools";
-import { toToolSpecs } from "../tools/types";
+import { type Tools, toToolSpecs } from "../tools/types";
 import { parseLocalCommand } from "./localCommands";
 import { Markdown } from "./Markdown";
 
@@ -29,6 +29,7 @@ export type AppProps = {
 	cwd: string;
 	model: ModelClient;
 	initialState?: AgentState;
+	mcpTools?: Tools;
 };
 
 type Turn = {
@@ -71,7 +72,9 @@ export function App({
 	cwd,
 	model,
 	initialState: restoredState,
+	mcpTools = [],
 }: AppProps) {
+	const tools = useMemo(() => [...BUILTIN_TOOLS, ...mcpTools], [mcpTools]);
 	const [modelName, setModelName] = useState<string | undefined>();
 	const [agentState, setAgentState] = useState<AgentState | undefined>(
 		restoredState,
@@ -113,7 +116,7 @@ export function App({
 					for await (const event of query({
 						initialState,
 						model,
-						tools: BUILTIN_TOOLS,
+						tools,
 					})) {
 						if (event.type === "request_start") {
 							setModelName(event.model);
@@ -168,7 +171,7 @@ export function App({
 				}
 			})();
 		},
-		[cwd, model, status],
+		[cwd, model, status, tools],
 	);
 
 	const runTurn = useCallback(
@@ -180,11 +183,11 @@ export function App({
 
 			const initialState = agentState
 				? continueState(agentState, trimmed)
-				: createInitialState(trimmed, cwd, toToolSpecs(BUILTIN_TOOLS));
+				: createInitialState(trimmed, cwd, toToolSpecs(tools));
 
 			runState(initialState, trimmed, agentState?.messages.length ?? 0);
 		},
-		[agentState, cwd, runState, status],
+		[agentState, cwd, runState, status, tools],
 	);
 
 	// biome-ignore lint/correctness/useExhaustiveDependencies: intentionally runs once on mount, not on every task/runTurn change
@@ -270,8 +273,7 @@ export function App({
 
 			if (localCommand.type === "enter_plan_mode") {
 				const nextState = enterPlanMode(
-					agentState ??
-						createInitialState("/plan", cwd, toToolSpecs(BUILTIN_TOOLS)),
+					agentState ?? createInitialState("/plan", cwd, toToolSpecs(tools)),
 				);
 				setAgentState(nextState);
 				setHistory((current) => [

@@ -13,6 +13,11 @@ export type Tool<Input = unknown, Output = unknown> = {
 	isReadOnly?: boolean;
 	isConcurrencySafe?: boolean;
 	inputSchema: z.ZodType<Input>;
+	/**
+	 * An externally supplied JSON Schema. MCP tools use this instead of a
+	 * generated Zod schema so the model receives the server's exact contract.
+	 */
+	inputJSONSchema?: unknown;
 	call(input: Input, context?: ToolContext): Promise<Output>;
 };
 
@@ -28,7 +33,7 @@ export function toToolSpec(tool: Tool): ToolSpec {
 	return {
 		name: tool.name,
 		description: tool.description,
-		inputSchema: toJSONSchema(tool.inputSchema),
+		inputSchema: tool.inputJSONSchema ?? toJSONSchema(tool.inputSchema),
 	};
 }
 

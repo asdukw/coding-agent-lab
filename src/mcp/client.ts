@@ -1,0 +1,246 @@
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { z } from "zod";
+import type { Tool, Tools } from "../tools/types";
+import { loadMcpServerConfigs, type NamedMcpStdioServerConfig } from "./config";
+
+export type McpToolDefinition = {
+	name: string;
+	description?: string;
+	inputSchema: Record<string, unknown>;
+	annotations?: {
+		readOnlyHint?: boolean;
+	};
+};
+
+export type McpToolCallResult = {
+	content: unknown[];
+	isError?: boolean;
+	structuredContent?: unknown;
+	_meta?: Record<string, unknown>;
+};
+
+export type McpClientConnection = {
+	listTools(): Promise<{ tools: McpToolDefinition[] }>;
+	callTool(input: {
+		name: string;
+		arguments: Record<string, unknown>;
+	}): Promise<McpToolCallResult>;
+	close(): Promise<void>;
+};
+
+export type ConnectMcpServer = (
+	server: NamedMcpStdioServerConfig,
+) => Promise<McpClientConnection>;
+
+export type McpDiscovery = {
+	tools: Tools;
+	diagnostics: string[];
+	close(): Promise<void>;
+};
+
+const externalInputSchema = z.object({}).passthrough();
+const DEFAULT_MCP_DISCOVERY_TIMEOUT_MS = 10_000;
+
+export async function discoverMcpTools(
+	cwd: string,
+	connect: ConnectMcpServer = connectStdioMcpServer,
+): Promise<McpDiscovery> {
+	const servers = await loadMcpServerConfigs(cwd);
+	const tools: Tool[] = [];
+	const diagnostics: string[] = [];
+	const clients: McpClientConnection[] = [];
+	const names = new Set<string>();
+
+	for (const server of servers) {
+		let client: McpClientConnection | undefined;
+		try {
+			client = await connect(server);
+			const result = await withTimeout(
+				client.listTools(),
+				`MCP server "${server.name}" tool discovery timed out`,
+			);
+			clients.push(client);
+
+			for (const definition of result.tools) {
+				const tool = toCagentMcpTool(server.name, definition, client);
+				if (names.has(tool.name)) {
+					throw new Error(`duplicate MCP tool name: ${tool.name}`);
+				}
+				names.add(tool.name);
+				tools.push(tool);
+			}
+		} catch (caught) {
+			await client?.close().catch(() => undefined);
+			diagnostics.push(
+				`MCP server "${server.name}" was skipped: ${formatCaught(caught)}`,
+			);
+		}
+	}
+
+	return {
+		tools,
+		diagnostics,
+		async close() {
+			await Promise.allSettled(clients.map((client) => client.close()));
+		},
+	};
+}
+
+export async function connectStdioMcpServer(
+	server: NamedMcpStdioServerConfig,
+): Promise<McpClientConnection> {
+	const transport = new StdioClientTransport({
+		command: server.command,
+		args: server.args,
+		env: { ...inheritedEnvironment(), ...server.env },
+		cwd: process.cwd(),
+	});
+	const client = new Client(
+		{ name: "cagent", version: "0.1.0" },
+		{ capabilities: {} },
+	);
+
+	try {
+		await withTimeout(
+			client.connect(transport),
+			`MCP server "${server.name}" connection timed out`,
+		);
+	} catch (caught) {
+		await client.close().catch(() => undefined);
+		throw caught;
+	}
+
+	return {
+		async listTools() {
+			return client.listTools();
+		},
+		async callTool(input) {
+			return toMcpToolCallResult(await client.callTool(input));
+		},
+		async close() {
+			await client.close();
+		},
+	};
+}
+
+function toMcpToolCallResult(
+	result: Record<string, unknown>,
+): McpToolCallResult {
+	if (!Array.isArray(result.content)) {
+		throw new Error("MCP tool returned an asynchronous task result");
+	}
+
+	const output: McpToolCallResult = { content: result.content };
+	if (result.isError === true) {
+		output.isError = true;
+	}
+	if ("structuredContent" in result) {
+		output.structuredContent = result.structuredContent;
+	}
+	if (isRecord(result._meta)) {
+		output._meta = result._meta;
+	}
+	return output;
+}
+
+function toCagentMcpTool(
+	serverName: string,
+	definition: McpToolDefinition,
+	client: McpClientConnection,
+): Tool<Record<string, unknown>, McpToolCallResult> {
+	const name = buildMcpToolName(serverName, definition.name);
+
+	return {
+		name,
+		description: definition.description ?? `MCP tool ${definition.name}`,
+		isReadOnly: definition.annotations?.readOnlyHint ?? false,
+		isConcurrencySafe: definition.annotations?.readOnlyHint ?? false,
+		inputSchema: externalInputSchema,
+		inputJSONSchema: definition.inputSchema,
+		async call(args) {
+			const result = await client.callTool({
+				name: definition.name,
+				arguments: args,
+			});
+			if (result.isError) {
+				throw new Error(formatMcpError(result));
+			}
+			return result;
+		},
+	};
+}
+
+function buildMcpToolName(serverName: string, toolName: string): string {
+	return `mcp__${normalizeName(serverName)}__${normalizeName(toolName)}`;
+}
+
+function normalizeName(name: string): string {
+	const normalized = name.replace(/[^a-zA-Z0-9_-]/g, "_");
+	if (!normalized) {
+		throw new Error("MCP server and tool names must contain valid characters");
+	}
+	return normalized;
+}
+
+function formatMcpError(result: McpToolCallResult): string {
+	const text = result.content
+		.map((item) => {
+			if (
+				typeof item === "object" &&
+				item !== null &&
+				"type" in item &&
+				(item as { type?: unknown }).type === "text" &&
+				"text" in item &&
+				typeof (item as { text?: unknown }).text === "string"
+			) {
+				return (item as { text: string }).text;
+			}
+			return JSON.stringify(item);
+		})
+		.filter(Boolean)
+		.join("\n");
+
+	return text || "MCP tool returned an error";
+}
+
+function inheritedEnvironment(): Record<string, string> {
+	return Object.fromEntries(
+		Object.entries(process.env).filter(
+			(entry): entry is [string, string] => typeof entry[1] === "string",
+		),
+	);
+}
+
+function withTimeout<T>(operation: Promise<T>, message: string): Promise<T> {
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	return Promise.race([
+		operation,
+		new Promise<never>((_, reject) => {
+			timeout = setTimeout(
+				() => reject(new Error(message)),
+				getMcpDiscoveryTimeoutMs(),
+			);
+		}),
+	]).finally(() => {
+		if (timeout) {
+			clearTimeout(timeout);
+		}
+	});
+}
+
+function getMcpDiscoveryTimeoutMs(): number {
+	const configured = Number.parseInt(
+		process.env.MCP_DISCOVERY_TIMEOUT_MS ?? "",
+		10,
+	);
+	return configured > 0 ? configured : DEFAULT_MCP_DISCOVERY_TIMEOUT_MS;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function formatCaught(caught: unknown): string {
+	return caught instanceof Error ? caught.message : String(caught);
+}

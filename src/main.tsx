@@ -1,4 +1,5 @@
 import { render } from "ink";
+import { discoverMcpTools } from "./mcp/client";
 import { createModelClientFromEnv } from "./model";
 import { loadSession } from "./sessionStore";
 import { App } from "./ui/App";
@@ -41,9 +42,19 @@ async function main(): Promise<void> {
 	const { task, resumeId } = parseCliArgs(process.argv.slice(2));
 	const initialState = resumeId ? await loadSession(cwd, resumeId) : undefined;
 	const model = createModelClientFromEnv();
+	const mcp = await discoverMcpTools(cwd);
+	for (const diagnostic of mcp.diagnostics) {
+		process.stderr.write(`${diagnostic}\n`);
+	}
 
 	render(
-		<App task={task} cwd={cwd} model={model} initialState={initialState} />,
+		<App
+			task={task}
+			cwd={cwd}
+			model={model}
+			initialState={initialState}
+			mcpTools={mcp.tools}
+		/>,
 	);
 }
 
