@@ -36,6 +36,11 @@ export type BudgetState = {
 	maxTurns: number;
 };
 
+export type CompactionState = {
+	/** Consecutive automatic compaction failures in this session. */
+	consecutiveFailures: number;
+};
+
 export type AgentMode = "normal" | "plan";
 export type AgentType = "main" | "memory";
 
@@ -92,6 +97,7 @@ export type AgentState = {
 	turn: number;
 	maxTurns: number;
 	budget: BudgetState;
+	compaction: CompactionState;
 	lastToolCall?: ToolCall;
 	finalAnswer?: string;
 	transition?: {
@@ -126,6 +132,7 @@ export function createInitialState(
 			turnsUsed: 0,
 			maxTurns: 20,
 		},
+		compaction: { consecutiveFailures: 0 },
 		transition: { reason: "start" },
 	};
 }

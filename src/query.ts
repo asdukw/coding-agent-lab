@@ -1,3 +1,4 @@
+import { type AutoCompactOptions, autoCompactIfNeeded } from "./compact";
 import {
 	buildMemorySelectionMessages,
 	formatMemoryManifest,
@@ -24,6 +25,7 @@ export type QueryParams = {
 	model: ModelClient;
 	tools?: Tools;
 	enableMemoryExtraction?: boolean;
+	autoCompactOptions?: AutoCompactOptions;
 };
 
 export type Terminal = {
@@ -49,6 +51,10 @@ export type QueryEvent =
 			state: AgentState;
 	  }
 	| {
+			type: "compaction";
+			state: AgentState;
+	  }
+	| {
 			type: "plan_approval_request";
 			plan: string;
 			state: AgentState;
@@ -67,6 +73,7 @@ export async function* query({
 	model,
 	tools,
 	enableMemoryExtraction = true,
+	autoCompactOptions,
 }: QueryParams): AsyncGenerator<QueryEvent, Terminal> {
 	const runtimeTools = tools ?? [];
 	let state: AgentState = {
@@ -92,6 +99,16 @@ export async function* query({
 			const terminal: Terminal = { reason: "max_turns", state };
 			yield { type: "terminal", terminal };
 			return terminal;
+		}
+
+		const compaction = await autoCompactIfNeeded(
+			state,
+			model,
+			autoCompactOptions,
+		);
+		state = compaction.state;
+		if (compaction.didCompact) {
+			yield { type: "compaction", state };
 		}
 
 		state = {

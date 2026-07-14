@@ -11,6 +11,7 @@ import { resolveContainedWritePath } from "./pathSafety";
 import {
 	type AgentState,
 	type BudgetState,
+	type CompactionState,
 	type Message,
 	normalizeToolPermissionContext,
 	type RuntimePlan,
@@ -41,6 +42,7 @@ export type StoredSessionState = {
 	messages: Message[];
 	turn: number;
 	budget: BudgetState;
+	compaction?: CompactionState;
 };
 
 export type StoredSession = {
@@ -59,6 +61,16 @@ export type SessionEvent =
 			payload: {
 				cwd: string;
 				task: string;
+			};
+	  }
+	| {
+			version: 2;
+			timestamp: string;
+			type: "context_compaction";
+			sessionId: string;
+			payload: {
+				messages: Message[];
+				compaction: CompactionState;
 			};
 	  }
 	| {
@@ -92,6 +104,7 @@ export type SessionEvent =
 				plan: RuntimePlan;
 				turn: number;
 				budget: BudgetState;
+				compaction: CompactionState;
 			};
 	  }
 	| {
@@ -209,6 +222,25 @@ export async function appendSessionState(
 			plan: state.plan,
 			turn: state.turn,
 			budget: state.budget,
+			compaction: state.compaction,
+		},
+	});
+	await appendSessionIndex(cwd, state);
+}
+
+export async function appendSessionCompaction(
+	cwd: string,
+	state: AgentState,
+): Promise<void> {
+	await ensureSessionStarted(cwd, state);
+	await appendSessionEvent(cwd, {
+		version: 2,
+		timestamp: new Date().toISOString(),
+		type: "context_compaction",
+		sessionId: state.sessionId,
+		payload: {
+			messages: state.messages,
+			compaction: state.compaction,
 		},
 	});
 	await appendSessionIndex(cwd, state);
@@ -314,6 +346,7 @@ export async function saveSession(
 				plan: state.plan,
 				turn: state.turn,
 				budget: state.budget,
+				compaction: state.compaction,
 			},
 		},
 	];
@@ -511,6 +544,15 @@ function applyCurrentSessionEvent(
 			plan: event.payload.plan,
 			turn: event.payload.turn,
 			budget: event.payload.budget,
+			compaction: event.payload.compaction,
+		};
+	}
+
+	if (event.type === "context_compaction") {
+		return {
+			...state,
+			messages: event.payload.messages,
+			compaction: event.payload.compaction,
 		};
 	}
 
@@ -585,6 +627,7 @@ function fromStoredSessionState(
 		turn: state.turn ?? budget.turnsUsed,
 		maxTurns: budget.maxTurns,
 		budget,
+		compaction: state.compaction ?? { consecutiveFailures: 0 },
 		transition: { reason: "start" },
 	};
 }

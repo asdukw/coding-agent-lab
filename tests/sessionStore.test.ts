@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseCliArgs } from "../src/main";
 import {
+	appendSessionCompaction,
 	appendSessionMemoryExtraction,
 	appendSessionMessage,
 	appendSessionState,
@@ -152,6 +153,34 @@ test("appendSessionMemoryExtraction records a lightweight background event", asy
 
 		const restored = await loadSession(cwd, "memory-event-1");
 		expect(restored.messages).toEqual([]);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("context compaction replaces restored session history", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "cagent-session-"));
+	try {
+		const state = createInitialState("first", cwd, [], "compact-session-1");
+		await ensureSessionStarted(cwd, state);
+		for (const message of state.messages) {
+			await appendSessionMessage(cwd, state, message);
+		}
+
+		const compacted: AgentState = {
+			...state,
+			messages: [
+				{
+					role: "system",
+					content: "## Auto-compacted conversation summary\n\nfirst task",
+				},
+				{ role: "user", content: "continue with the current task" },
+			],
+		};
+		await appendSessionCompaction(cwd, compacted);
+
+		const restored = await loadSession(cwd, state.sessionId);
+		expect(restored.messages).toEqual(compacted.messages);
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}

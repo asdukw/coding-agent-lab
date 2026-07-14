@@ -6,6 +6,7 @@ import { runMemoryExtractionSubAgent } from "../memoryExtract";
 import type { ModelClient } from "../model/client";
 import { query } from "../query";
 import {
+	appendSessionCompaction,
 	appendSessionMessage,
 	appendSessionState,
 	ensureSessionStarted,
@@ -128,6 +129,8 @@ export function App({
 						} else if (event.type === "state") {
 							await appendSessionState(cwd, event.state);
 							statePersisted = true;
+						} else if (event.type === "compaction") {
+							await appendSessionCompaction(cwd, event.state);
 						} else if (event.type === "memory_extraction_request") {
 							void runMemoryExtractionSubAgent({
 								state: event.state,

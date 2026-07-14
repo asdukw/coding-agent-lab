@@ -1,0 +1,148 @@
+import { expect, test } from "bun:test";
+import {
+	autoCompactIfNeeded,
+	selectMessagesForCompaction,
+} from "../src/compact";
+import type {
+	ModelClient,
+	ModelRequest,
+	ModelStreamEvent,
+} from "../src/model/client";
+import { query, type Terminal } from "../src/query";
+import { type AgentState, createInitialState } from "../src/state";
+
+class CompactingModel implements ModelClient {
+	readonly name = "compacting-model";
+	readonly requests: ModelRequest[] = [];
+
+	async *stream(request: ModelRequest): AsyncGenerator<ModelStreamEvent> {
+		this.requests.push(request);
+		if (request.messages[0]?.content.includes("Summarize the prior")) {
+			yield {
+				type: "text_delta",
+				content: "The user is updating cagent. MCP discovery is complete.",
+			};
+			return;
+		}
+
+		yield { type: "text_delta", content: "continued" };
+	}
+}
+
+function stateWithThreeTurns(): AgentState {
+	const state = createInitialState("first task", "/repo");
+	return {
+		...state,
+		messages: [
+			{ role: "user" as const, content: "first task" },
+			{ role: "assistant" as const, content: "first result" },
+			{ role: "user" as const, content: "second task" },
+			{ role: "assistant" as const, content: "second result" },
+			{ role: "user" as const, content: "third task" },
+			{ role: "assistant" as const, content: "third result" },
+		],
+	};
+}
+
+test("selectMessagesForCompaction keeps complete recent user turns", () => {
+	const selection = selectMessagesForCompaction(
+		stateWithThreeTurns().messages,
+		1,
+	);
+
+	expect(selection?.toCompact.map((message) => message.content)).toEqual([
+		"first task",
+		"first result",
+		"second task",
+		"second result",
+	]);
+	expect(selection?.retained.map((message) => message.content)).toEqual([
+		"third task",
+		"third result",
+	]);
+});
+
+test("auto compact summarizes old history and preserves recent turns", async () => {
+	const model = new CompactingModel();
+	const outcome = await autoCompactIfNeeded(stateWithThreeTurns(), model, {
+		maxContextChars: 1,
+		retainRecentTurns: 1,
+	});
+
+	expect(outcome.didCompact).toBe(true);
+	expect(outcome.state.messages.map((message) => message.role)).toEqual([
+		"system",
+		"user",
+		"assistant",
+	]);
+	expect(outcome.state.messages[0]?.content).toContain(
+		"Auto-compacted conversation summary",
+	);
+	expect(outcome.state.messages[1]?.content).toBe("third task");
+	expect(outcome.state.compaction.consecutiveFailures).toBe(0);
+	expect(model.requests).toHaveLength(1);
+	expect(model.requests[0]?.toolSpecs).toEqual([]);
+});
+
+test("auto compact stops retrying after three consecutive failures", async () => {
+	let calls = 0;
+	const model: ModelClient = {
+		name: "failing-compact-model",
+		async *stream(): AsyncGenerator<ModelStreamEvent> {
+			calls++;
+			if (calls > 0) {
+				throw new Error("summary unavailable");
+			}
+			yield { type: "text_delta", content: "unreachable" };
+		},
+	};
+
+	let state = stateWithThreeTurns();
+	for (let attempt = 0; attempt < 3; attempt++) {
+		const outcome = await autoCompactIfNeeded(state, model, {
+			maxContextChars: 1,
+			retainRecentTurns: 1,
+		});
+		state = outcome.state;
+		expect(outcome.didCompact).toBe(false);
+	}
+
+	const skipped = await autoCompactIfNeeded(state, model, {
+		maxContextChars: 1,
+		retainRecentTurns: 1,
+	});
+	expect(skipped.didCompact).toBe(false);
+	expect(state.compaction.consecutiveFailures).toBe(3);
+	expect(calls).toBe(3);
+});
+
+test("query compacts before the next main-model request", async () => {
+	const model = new CompactingModel();
+	const compactionEvents: string[] = [];
+	let terminal: Terminal | undefined;
+
+	for await (const event of query({
+		initialState: stateWithThreeTurns(),
+		model,
+		tools: [],
+		enableMemoryExtraction: false,
+		autoCompactOptions: { maxContextChars: 1, retainRecentTurns: 1 },
+	})) {
+		if (event.type === "compaction") {
+			compactionEvents.push(event.state.messages[0]?.content ?? "");
+		}
+		if (event.type === "terminal") {
+			terminal = event.terminal;
+		}
+	}
+
+	expect(compactionEvents).toHaveLength(1);
+	expect(compactionEvents[0]).toContain("Auto-compacted conversation summary");
+	expect(terminal?.state.finalAnswer).toBe("continued");
+	expect(model.requests).toHaveLength(2);
+	expect(
+		model.requests[1]?.messages.some((message) =>
+			message.content.includes("Auto-compacted conversation summary"),
+		),
+	).toBe(true);
+});
