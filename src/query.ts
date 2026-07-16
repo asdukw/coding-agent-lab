@@ -15,9 +15,13 @@ import {
 	ensureToolPermissionContext,
 	type Message,
 } from "./state";
+import {
+	formatToolExecutionMemory,
+	recordCompletedToolExecution,
+} from "./toolExecutionMemory";
 import { getToolsForMode } from "./tools/permissions";
 import { EXIT_PLAN_MODE_TOOL_NAME } from "./tools/planToolNames";
-import { runToolCall } from "./tools/runner";
+import { runToolCalls } from "./tools/runner";
 import { type Tools, toToolSpecs } from "./tools/types";
 
 export type QueryParams = {
@@ -78,6 +82,7 @@ export async function* query({
 	const runtimeTools = tools ?? [];
 	let state: AgentState = {
 		...ensureToolPermissionContext(initialState),
+		toolExecutions: initialState.toolExecutions ?? [],
 		toolSpecs: toToolSpecs(
 			getToolsForMode(ensureToolPermissionContext(initialState), runtimeTools),
 		),
@@ -208,21 +213,30 @@ export async function* query({
 			message: assistantMessage,
 		};
 
-		for (const call of toolCalls) {
-			const result = await runToolCall({
-				call,
-				tools: runtimeTools,
-				context: {
-					getState: () => state,
-					setState(next) {
-						state = typeof next === "function" ? next(state) : next;
-					},
+		const results = await runToolCalls({
+			calls: toolCalls,
+			tools: runtimeTools,
+			context: {
+				getState: () => state,
+				setState(next) {
+					state = typeof next === "function" ? next(state) : next;
 				},
-			});
+			},
+		});
+		for (const result of results) {
+			const call = result.call;
 			state = {
 				...state,
 				lastToolCall: { name: call.name, args: result.args },
 				observations: [...state.observations, result.observation],
+				toolExecutions: recordCompletedToolExecution(state.toolExecutions, {
+					callId: call.id,
+					tool: call.name,
+					args: result.args,
+					ok: result.ok,
+					turn: state.turn,
+					timestamp: new Date().toISOString(),
+				}),
 				messages: [...state.messages, result.message],
 			};
 			yield {
@@ -282,6 +296,14 @@ async function buildModelMessages(
 	).catch(() => "");
 	if (relevantMemoriesPrompt) {
 		systemMessages.push({ role: "system", content: relevantMemoriesPrompt });
+	}
+
+	const toolExecutionPrompt = formatToolExecutionMemory(
+		state.toolExecutions,
+		state.messages,
+	);
+	if (toolExecutionPrompt) {
+		systemMessages.push({ role: "system", content: toolExecutionPrompt });
 	}
 
 	return [...systemMessages, ...state.messages];

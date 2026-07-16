@@ -2,6 +2,11 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { z } from "zod";
 import { resolveMemoryWriteTarget, writeValidatedMemoryFile } from "../memory";
+import {
+	fileResourceAccesses,
+	memoryResourceAccess,
+	resolveToolPath,
+} from "./resourceLock";
 import type { Tool } from "./types";
 
 const inputSchema = z.object({
@@ -18,9 +23,19 @@ export const writeTool: Tool<Input, Output> = {
 	name: "Write",
 	description:
 		"Write content to a file, creating parent directories and overwriting any existing content",
-	isReadOnly: false,
-	isConcurrencySafe: false,
 	inputSchema,
+	async getResourceAccesses(input, context) {
+		const state = context?.getState();
+		input.file_path = resolveToolPath(
+			state?.cwd ?? process.cwd(),
+			input.file_path,
+		);
+		const accesses = await fileResourceAccesses(input.file_path, "write");
+		if (state && (await resolveMemoryWriteTarget(state.cwd, input.file_path))) {
+			accesses.push(await memoryResourceAccess(state.cwd, "write"));
+		}
+		return accesses;
+	},
 	async call({ file_path, content }, context) {
 		const state = context?.getState();
 		const memoryTarget = state

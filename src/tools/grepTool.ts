@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { glob } from "glob";
 import { z } from "zod";
+import { fileResourceAccesses, resolveToolPath } from "./resourceLock";
 import type { Tool } from "./types";
 
 const inputSchema = z.object({
@@ -32,9 +33,12 @@ const DEFAULT_IGNORE = ["**/node_modules/**", "**/.git/**"];
 export const grepTool: Tool<Input, Output> = {
 	name: "Grep",
 	description: "Search file contents for a regular expression",
-	isReadOnly: true,
-	isConcurrencySafe: true,
 	inputSchema,
+	async getResourceAccesses(input, context) {
+		const cwd = context?.getState().cwd ?? process.cwd();
+		input.path = resolveToolPath(cwd, input.path ?? ".");
+		return fileResourceAccesses(input.path, "read", "subtree");
+	},
 	async call({
 		pattern,
 		path,

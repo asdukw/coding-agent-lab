@@ -1,6 +1,7 @@
 import type { z } from "zod";
 import { toJSONSchema } from "zod";
 import type { AgentState } from "../state";
+import type { ResourceAccess } from "./resourceLock";
 
 export type ToolContext = {
 	getState(): AgentState;
@@ -10,9 +11,11 @@ export type ToolContext = {
 export type Tool<Input = unknown, Output = unknown> = {
 	name: string;
 	description: string;
-	isReadOnly?: boolean;
-	isConcurrencySafe?: boolean;
 	inputSchema: z.ZodType<Input>;
+	getResourceAccesses?(
+		input: Input,
+		context?: ToolContext,
+	): ResourceAccess[] | Promise<ResourceAccess[]>;
 	/**
 	 * An externally supplied JSON Schema. MCP tools use this instead of a
 	 * generated Zod schema so the model receives the server's exact contract.

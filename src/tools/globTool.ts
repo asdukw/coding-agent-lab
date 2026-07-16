@@ -1,5 +1,6 @@
 import { glob } from "glob";
 import { z } from "zod";
+import { fileResourceAccesses, resolveToolPath } from "./resourceLock";
 import type { Tool } from "./types";
 
 const inputSchema = z.object({
@@ -20,9 +21,12 @@ type Output = { filenames: string[] };
 export const globTool: Tool<Input, Output> = {
 	name: "Glob",
 	description: "Find files matching a glob pattern",
-	isReadOnly: true,
-	isConcurrencySafe: true,
 	inputSchema,
+	async getResourceAccesses(input, context) {
+		const cwd = context?.getState().cwd ?? process.cwd();
+		input.path = resolveToolPath(cwd, input.path ?? ".");
+		return fileResourceAccesses(input.path, "read", "subtree");
+	},
 	async call({ pattern, path }) {
 		const filenames = await glob(pattern, { cwd: path ?? process.cwd() });
 		return { filenames };

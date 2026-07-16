@@ -63,7 +63,14 @@ test("discovers stdio MCP tools and registers their original schema", async () =
 			throw new Error("expected the discovered MCP tool");
 		}
 		expect(tool?.name).toBe("mcp__demo_server__echo_tool");
-		expect(tool?.isReadOnly).toBe(true);
+		expect(await tool?.getResourceAccesses?.({}, undefined)).toEqual([
+			{
+				namespace: "mcp",
+				key: "demo server",
+				mode: "read",
+				scope: "exact",
+			},
+		]);
 		expect(toToolSpec(tool)).toEqual({
 			name: "mcp__demo_server__echo_tool",
 			description: "Echo a message",

@@ -10,6 +10,7 @@ import {
 	EXIT_PLAN_MODE_TOOL_NAME,
 	UPDATE_PLAN_TOOL_NAME,
 } from "./planToolNames";
+import { sessionResourceAccess } from "./resourceLock";
 import type { Tool, ToolContext } from "./types";
 
 function requireContext(context: ToolContext | undefined): ToolContext {
@@ -28,9 +29,15 @@ export const enterPlanModeTool: Tool<
 	name: ENTER_PLAN_MODE_TOOL_NAME,
 	description:
 		"Enter plan mode to inspect the project and prepare a runtime plan before implementation",
-	isReadOnly: false,
-	isConcurrencySafe: false,
 	inputSchema: noInputSchema,
+	getResourceAccesses(_input, context) {
+		return [
+			sessionResourceAccess(
+				requireContext(context).getState().sessionId,
+				"write",
+			),
+		];
+	},
 	async call(_input, context) {
 		const toolContext = requireContext(context);
 		toolContext.setState((state) => enterPlanMode(state));
@@ -67,9 +74,15 @@ export const updatePlanTool: Tool<
 	name: UPDATE_PLAN_TOOL_NAME,
 	description:
 		"Update the runtime plan. Provide the full ordered step list each time; this does not write any local files.",
-	isReadOnly: false,
-	isConcurrencySafe: false,
 	inputSchema: updatePlanInputSchema,
+	getResourceAccesses(_input, context) {
+		return [
+			sessionResourceAccess(
+				requireContext(context).getState().sessionId,
+				"write",
+			),
+		];
+	},
 	async call({ explanation, items }, context) {
 		const toolContext = requireContext(context);
 		const inProgressCount = items.filter(
@@ -101,9 +114,15 @@ export const exitPlanModeTool: Tool<
 	name: EXIT_PLAN_MODE_TOOL_NAME,
 	description:
 		"Present the current runtime plan for user approval and pause before implementation",
-	isReadOnly: false,
-	isConcurrencySafe: false,
 	inputSchema: noInputSchema,
+	getResourceAccesses(_input, context) {
+		return [
+			sessionResourceAccess(
+				requireContext(context).getState().sessionId,
+				"write",
+			),
+		];
+	},
 	async call(_input, context) {
 		const toolContext = requireContext(context);
 		const state = toolContext.getState();

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { ToolExecution } from "./toolExecutionMemory";
 import type { ToolSpec } from "./tools/types";
 
 export type Role = "user" | "assistant" | "tool" | "system";
@@ -93,6 +94,7 @@ export type AgentState = {
 	messages: Message[];
 	todos: TodoItem[];
 	observations: Observation[];
+	toolExecutions: ToolExecution[];
 	changedFiles: string[];
 	turn: number;
 	maxTurns: number;
@@ -125,6 +127,7 @@ export function createInitialState(
 		messages: [{ role: "user", content: task }],
 		todos: [],
 		observations: [],
+		toolExecutions: [],
 		changedFiles: [],
 		turn: 0,
 		maxTurns: 20,

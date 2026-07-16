@@ -1,6 +1,15 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { z } from "zod";
-import { readMemoryFileForEdit, writeValidatedMemoryFile } from "../memory";
+import {
+	readMemoryFileForEdit,
+	resolveMemoryWriteTarget,
+	writeValidatedMemoryFile,
+} from "../memory";
+import {
+	fileResourceAccesses,
+	memoryResourceAccess,
+	resolveToolPath,
+} from "./resourceLock";
 import type { Tool } from "./types";
 
 const inputSchema = z.object({
@@ -21,9 +30,19 @@ type Output = { replacements: number };
 export const editTool: Tool<Input, Output> = {
 	name: "Edit",
 	description: "Find and replace an exact string in a file",
-	isReadOnly: false,
-	isConcurrencySafe: false,
 	inputSchema,
+	async getResourceAccesses(input, context) {
+		const state = context?.getState();
+		input.file_path = resolveToolPath(
+			state?.cwd ?? process.cwd(),
+			input.file_path,
+		);
+		const accesses = await fileResourceAccesses(input.file_path, "write");
+		if (state && (await resolveMemoryWriteTarget(state.cwd, input.file_path))) {
+			accesses.push(await memoryResourceAccess(state.cwd, "write"));
+		}
+		return accesses;
+	},
 	async call({ file_path, old_string, new_string, replace_all }, context) {
 		const state = context?.getState();
 		const memoryFile = state

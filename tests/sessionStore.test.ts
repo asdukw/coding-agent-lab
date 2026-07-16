@@ -257,9 +257,14 @@ test("assistant tool calls are stored as separate audit events", async () => {
 				},
 			],
 		};
+		const toolResult = {
+			role: "tool" as const,
+			content: JSON.stringify({ content: "file contents" }),
+			toolCallId: "call-1",
+		};
 		const state: AgentState = {
 			...createInitialState("inspect", cwd, [], "tool-call-1"),
-			messages: [{ role: "user", content: "inspect" }, message],
+			messages: [{ role: "user", content: "inspect" }, message, toolResult],
 		};
 
 		await saveSession(cwd, state);
@@ -280,12 +285,22 @@ test("assistant tool calls are stored as separate audit events", async () => {
 			"user_message",
 			"assistant_message",
 			"tool_call",
+			"tool_result",
 			"state_snapshot",
 		]);
 		expect(events[3]?.payload?.name).toBe("Read");
 
 		const restored = await loadSession(cwd, "tool-call-1");
 		expect(restored.messages).toEqual(state.messages);
+		expect(restored.toolExecutions).toEqual([
+			expect.objectContaining({
+				callId: "call-1",
+				tool: "Read",
+				status: "succeeded",
+				target: "file_path=README.md",
+			}),
+		]);
+		expect(restored.toolExecutions[0]).not.toHaveProperty("output");
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}

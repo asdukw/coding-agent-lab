@@ -1,6 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { z } from "zod";
+import type { ResourceAccess } from "../tools/resourceLock";
 import type { Tool, Tools } from "../tools/types";
 import { loadMcpServerConfigs, type NamedMcpStdioServerConfig } from "./config";
 
@@ -154,10 +155,17 @@ function toCagentMcpTool(
 	return {
 		name,
 		description: definition.description ?? `MCP tool ${definition.name}`,
-		isReadOnly: definition.annotations?.readOnlyHint ?? false,
-		isConcurrencySafe: definition.annotations?.readOnlyHint ?? false,
 		inputSchema: externalInputSchema,
 		inputJSONSchema: definition.inputSchema,
+		getResourceAccesses() {
+			const access: ResourceAccess = {
+				namespace: "mcp",
+				key: serverName,
+				mode: definition.annotations?.readOnlyHint ? "read" : "write",
+				scope: "exact",
+			};
+			return [access];
+		},
 		async call(args) {
 			const result = await client.callTool({
 				name: definition.name,

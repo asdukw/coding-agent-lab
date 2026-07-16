@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { z } from "zod";
+import { fileResourceAccesses, resolveToolPath } from "./resourceLock";
 import type { Tool } from "./types";
 
 const inputSchema = z.object({
@@ -27,9 +28,12 @@ export const readTool: Tool<Input, Output> = {
 	name: "Read",
 	description:
 		"Read a text file from the local filesystem, optionally a line range",
-	isReadOnly: true,
-	isConcurrencySafe: true,
 	inputSchema,
+	async getResourceAccesses(input, context) {
+		const cwd = context?.getState().cwd ?? process.cwd();
+		input.file_path = resolveToolPath(cwd, input.file_path);
+		return fileResourceAccesses(input.file_path, "read");
+	},
 	async call({ file_path, offset, limit }) {
 		const text = await readFile(file_path, "utf-8");
 		const lines = text.split("\n");

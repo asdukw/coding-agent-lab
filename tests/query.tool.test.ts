@@ -49,9 +49,11 @@ async function makeTempDir(): Promise<string> {
 
 class FakeToolCallingModelClient implements ModelClient {
 	readonly name = "fake";
+	readonly requests: ModelRequest[] = [];
 	private callCount = 0;
 
-	async *stream(_request: ModelRequest): AsyncGenerator<ModelStreamEvent> {
+	async *stream(request: ModelRequest): AsyncGenerator<ModelStreamEvent> {
+		this.requests.push(request);
 		this.callCount++;
 		if (this.callCount === 1) {
 			yield {
@@ -113,6 +115,20 @@ test("query executes a tool call and round-trips the result back to the model", 
 		name: "add",
 		args: { a: 2, b: 3 },
 	});
+	expect(terminal?.state.toolExecutions).toEqual([
+		expect.objectContaining({
+			callId: "call_1",
+			tool: "add",
+			status: "succeeded",
+			turn: 1,
+		}),
+	]);
+	expect(terminal?.state.toolExecutions[0]).not.toHaveProperty("output");
+	expect(
+		model.requests[1]?.messages.some((message) =>
+			message.content.includes("# Session tool execution history"),
+		),
+	).toBe(false);
 });
 
 test("query feeds an error back as the tool result when the tool is unknown", async () => {
@@ -129,6 +145,7 @@ test("query feeds an error back as the tool result when the tool is unknown", as
 	const toolMessage = terminal?.state.messages.find((m) => m.role === "tool");
 	expect(toolMessage?.content).toBe("error: unknown tool: add");
 	expect(terminal?.state.observations[0]?.ok).toBe(false);
+	expect(terminal?.state.toolExecutions[0]?.status).toBe("failed");
 });
 
 class FakeInvalidArgsModelClient implements ModelClient {
@@ -661,6 +678,38 @@ class RecordingModelClient implements ModelClient {
 		yield { type: "text_delta", content: "done" };
 	}
 }
+
+test("query injects prior tool executions without raw outputs", async () => {
+	const cwd = await makeTempDir();
+	try {
+		const model = new RecordingModelClient();
+		const initialState = {
+			...createInitialState("continue", cwd),
+			toolExecutions: [
+				{
+					callId: "old-read",
+					tool: "Read",
+					status: "succeeded" as const,
+					target: "file_path=README.md",
+					turn: 1,
+				},
+			],
+		};
+
+		for await (const _event of query({ initialState, model, tools: [] })) {
+			// Consume the query.
+		}
+
+		const prompt = model.requests[0]?.messages.find((message) =>
+			message.content.includes("# Session tool execution history"),
+		)?.content;
+		expect(prompt).toContain("[succeeded] Read");
+		expect(prompt).toContain("target=file_path=README.md");
+		expect(prompt).toContain("Raw tool outputs are intentionally omitted");
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
 
 class MemorySelectingModelClient implements ModelClient {
 	readonly name = "memory-selecting";

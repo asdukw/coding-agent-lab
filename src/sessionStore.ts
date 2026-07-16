@@ -17,6 +17,13 @@ import {
 	type RuntimePlan,
 	type ToolPermissionContext,
 } from "./state";
+import {
+	deriveToolExecutions,
+	parseToolArguments,
+	recordToolCall,
+	recordToolResult,
+	type ToolExecution,
+} from "./toolExecutionMemory";
 import { BUILTIN_TOOLS } from "./tools";
 import { toToolSpecs } from "./tools/types";
 
@@ -40,6 +47,7 @@ export type StoredSessionState = {
 	toolPermissionContext?: ToolPermissionContext;
 	plan?: RuntimePlan;
 	messages: Message[];
+	toolExecutions?: ToolExecution[];
 	turn: number;
 	budget: BudgetState;
 	compaction?: CompactionState;
@@ -105,6 +113,7 @@ export type SessionEvent =
 				turn: number;
 				budget: BudgetState;
 				compaction: CompactionState;
+				toolExecutions?: ToolExecution[];
 			};
 	  }
 	| {
@@ -223,6 +232,7 @@ export async function appendSessionState(
 			turn: state.turn,
 			budget: state.budget,
 			compaction: state.compaction,
+			toolExecutions: state.toolExecutions,
 		},
 	});
 	await appendSessionIndex(cwd, state);
@@ -321,6 +331,9 @@ export async function saveSession(
 	state: AgentState,
 ): Promise<string> {
 	const path = getSessionPath(cwd, state.sessionId);
+	const toolExecutions = state.toolExecutions.length
+		? state.toolExecutions
+		: deriveToolExecutions(state.messages);
 	const events: SessionEvent[] = [
 		{
 			version: 2,
@@ -347,6 +360,7 @@ export async function saveSession(
 				turn: state.turn,
 				budget: state.budget,
 				compaction: state.compaction,
+				toolExecutions,
 			},
 		},
 	];
@@ -416,6 +430,7 @@ function replaySessionEvents(
 		task: "",
 		cwd: fallbackCwd,
 		messages: [],
+		toolExecutions: [],
 		turn: 0,
 		budget: { turnsUsed: 0, maxTurns: 20 },
 	};
@@ -525,14 +540,37 @@ function applyCurrentSessionEvent(
 		};
 	}
 
-	if (
-		event.type === "user_message" ||
-		event.type === "assistant_message" ||
-		event.type === "tool_result"
-	) {
+	if (event.type === "user_message" || event.type === "assistant_message") {
 		return {
 			...state,
 			messages: [...state.messages, event.payload.message],
+		};
+	}
+
+	if (event.type === "tool_call") {
+		return {
+			...state,
+			toolExecutions: recordToolCall(state.toolExecutions ?? [], {
+				callId: event.payload.id,
+				tool: event.payload.name,
+				args: parseToolArguments(event.payload.arguments),
+				timestamp: event.timestamp,
+			}),
+		};
+	}
+
+	if (event.type === "tool_result") {
+		const message = event.payload.message;
+		return {
+			...state,
+			messages: [...state.messages, message],
+			toolExecutions: message.toolCallId
+				? recordToolResult(
+						state.toolExecutions ?? [],
+						message.toolCallId,
+						!message.content.startsWith("error:"),
+					)
+				: state.toolExecutions,
 		};
 	}
 
@@ -545,6 +583,7 @@ function applyCurrentSessionEvent(
 			turn: event.payload.turn,
 			budget: event.payload.budget,
 			compaction: event.payload.compaction,
+			toolExecutions: event.payload.toolExecutions ?? state.toolExecutions,
 		};
 	}
 
@@ -610,6 +649,7 @@ function fromStoredSessionState(
 ): AgentState {
 	const budget = state.budget ?? { turnsUsed: 0, maxTurns: 20 };
 	const cwd = state.cwd ?? process.cwd();
+	const messages = state.messages ?? [];
 	return {
 		sessionId: state.sessionId ?? "",
 		task: state.task ?? "",
@@ -620,9 +660,12 @@ function fromStoredSessionState(
 			cwd,
 		),
 		plan: state.plan ?? { items: [] },
-		messages: state.messages ?? [],
+		messages,
 		todos: [],
 		observations: [],
+		toolExecutions: state.toolExecutions?.length
+			? state.toolExecutions
+			: deriveToolExecutions(messages),
 		changedFiles: [],
 		turn: state.turn ?? budget.turnsUsed,
 		maxTurns: budget.maxTurns,

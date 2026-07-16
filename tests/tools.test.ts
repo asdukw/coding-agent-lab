@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { z } from "zod";
 import {
 	ensureMemoryStore,
 	getMemoryDir,
@@ -13,30 +14,63 @@ import { editTool } from "../src/tools/editTool";
 import { globTool } from "../src/tools/globTool";
 import { grepTool } from "../src/tools/grepTool";
 import { readTool } from "../src/tools/readTool";
-import type { ToolContext } from "../src/tools/types";
+import { RuntimeResourceLock } from "../src/tools/resourceLock";
+import { runToolCalls } from "../src/tools/runner";
+import type { Tool, ToolContext } from "../src/tools/types";
 import { writeTool } from "../src/tools/writeTool";
 
 async function makeTempDir(): Promise<string> {
 	return mkdtemp(join(tmpdir(), "cagent-tools-"));
 }
 
-test("built-in tools declare read-only and concurrency metadata", () => {
-	const metadata = new Map(BUILTIN_TOOLS.map((tool) => [tool.name, tool]));
+test("built-in tools declare resource access plans", async () => {
+	const dir = await makeTempDir();
+	try {
+		let state = createInitialState("inspect", dir);
+		const context: ToolContext = {
+			getState: () => state,
+			setState(next) {
+				state = typeof next === "function" ? next(state) : next;
+			},
+		};
+		const metadata = new Map(BUILTIN_TOOLS.map((tool) => [tool.name, tool]));
+		for (const tool of BUILTIN_TOOLS) {
+			expect(tool.getResourceAccesses).toBeFunction();
+		}
 
-	for (const name of ["Read", "Glob", "Grep"]) {
-		expect(metadata.get(name)?.isReadOnly).toBe(true);
-		expect(metadata.get(name)?.isConcurrencySafe).toBe(true);
-	}
+		const readAccesses = await readTool.getResourceAccesses?.(
+			{ file_path: join(dir, "read.txt") },
+			context,
+		);
+		expect(readAccesses?.[0]).toMatchObject({
+			namespace: "fs",
+			mode: "read",
+			scope: "exact",
+		});
 
-	for (const name of [
-		"Write",
-		"Edit",
-		"EnterPlanMode",
-		"UpdatePlan",
-		"ExitPlanMode",
-	]) {
-		expect(metadata.get(name)?.isReadOnly).toBe(false);
-		expect(metadata.get(name)?.isConcurrencySafe).toBe(false);
+		const writeAccesses = await writeTool.getResourceAccesses?.(
+			{ file_path: join(dir, "write.txt"), content: "content" },
+			context,
+		);
+		expect(writeAccesses?.[0]).toMatchObject({
+			namespace: "fs",
+			mode: "write",
+			scope: "exact",
+		});
+
+		const planAccesses = await metadata
+			.get("EnterPlanMode")
+			?.getResourceAccesses?.({}, context);
+		expect(planAccesses).toEqual([
+			{
+				namespace: "session",
+				key: state.sessionId,
+				mode: "write",
+				scope: "exact",
+			},
+		]);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
 	}
 });
 
@@ -188,4 +222,130 @@ test("grepTool finds matching files and lines", async () => {
 		output_mode: "count",
 	});
 	expect(countResult.output).toBe("3");
+});
+
+test("runtime resource lock supports readers, writer fairness, and subtree conflicts", async () => {
+	const locks = new RuntimeResourceLock();
+	const root = join(process.cwd(), "locked-tree");
+	const file = join(root, "file.txt");
+	const unrelated = join(process.cwd(), "other-tree", "file.txt");
+	const releaseTreeRead = await locks.acquire([
+		{ namespace: "fs", key: root, scope: "subtree", mode: "read" },
+	]);
+	const releaseFileRead = await locks.acquire([
+		{ namespace: "fs", key: file, scope: "exact", mode: "read" },
+	]);
+
+	let writerAcquired = false;
+	const writer = locks
+		.acquire([{ namespace: "fs", key: file, scope: "exact", mode: "write" }])
+		.then((release) => {
+			writerAcquired = true;
+			return release;
+		});
+	let lateReaderAcquired = false;
+	const lateReader = locks
+		.acquire([{ namespace: "fs", key: file, scope: "exact", mode: "read" }])
+		.then((release) => {
+			lateReaderAcquired = true;
+			return release;
+		});
+	await Promise.resolve();
+	expect(writerAcquired).toBe(false);
+	expect(lateReaderAcquired).toBe(false);
+
+	const releaseUnrelated = await locks.acquire([
+		{ namespace: "fs", key: unrelated, scope: "exact", mode: "write" },
+	]);
+	releaseUnrelated();
+	releaseTreeRead();
+	releaseFileRead();
+
+	const releaseWriter = await writer;
+	expect(writerAcquired).toBe(true);
+	await Promise.resolve();
+	expect(lateReaderAcquired).toBe(false);
+	releaseWriter();
+	const releaseLateReader = await lateReader;
+	expect(lateReaderAcquired).toBe(true);
+	releaseLateReader();
+});
+
+test("runToolCalls executes independent resources concurrently and preserves result order", async () => {
+	const inputSchema = z.object({
+		resource: z.string(),
+		delay: z.number(),
+	});
+	let active = 0;
+	let maxActive = 0;
+	const tool: Tool<z.infer<typeof inputSchema>, { resource: string }> = {
+		name: "ResourceTool",
+		description: "Exercise resource-aware scheduling",
+		inputSchema,
+		getResourceAccesses(input) {
+			return [
+				{
+					namespace: "runtime",
+					key: input.resource,
+					mode: "write",
+					scope: "exact",
+				},
+			];
+		},
+		async call(input) {
+			active++;
+			maxActive = Math.max(maxActive, active);
+			await new Promise((resolveDelay) =>
+				setTimeout(resolveDelay, input.delay),
+			);
+			active--;
+			return { resource: input.resource };
+		},
+	};
+	const state = createInitialState("schedule", process.cwd());
+	const context = {
+		getState: () => state,
+		setState() {},
+	};
+	const results = await runToolCalls({
+		calls: [
+			{
+				id: "slow",
+				name: tool.name,
+				arguments: JSON.stringify({ resource: "a", delay: 20 }),
+			},
+			{
+				id: "fast",
+				name: tool.name,
+				arguments: JSON.stringify({ resource: "b", delay: 1 }),
+			},
+		],
+		tools: [tool],
+		context,
+		lockManager: new RuntimeResourceLock(),
+	});
+
+	expect(maxActive).toBe(2);
+	expect(results.map((result) => result.call.id)).toEqual(["slow", "fast"]);
+
+	active = 0;
+	maxActive = 0;
+	await runToolCalls({
+		calls: [
+			{
+				id: "first",
+				name: tool.name,
+				arguments: JSON.stringify({ resource: "same", delay: 5 }),
+			},
+			{
+				id: "second",
+				name: tool.name,
+				arguments: JSON.stringify({ resource: "same", delay: 5 }),
+			},
+		],
+		tools: [tool],
+		context,
+		lockManager: new RuntimeResourceLock(),
+	});
+	expect(maxActive).toBe(1);
 });
