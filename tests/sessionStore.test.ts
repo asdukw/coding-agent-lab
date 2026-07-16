@@ -44,6 +44,7 @@ test("saveSession writes JSONL events and loadSession hydrates runtime fields", 
 				{ role: "user", content: "hello" },
 				{ role: "assistant", content: "hello back" },
 			],
+			changedFiles: ["src/auth.ts"],
 		};
 		const path = await saveSession(cwd, state);
 
@@ -74,7 +75,7 @@ test("saveSession writes JSONL events and loadSession hydrates runtime fields", 
 		expect(restored.toolSpecs.map((tool) => tool.name)).toContain("Read");
 		expect(restored.finalAnswer).toBeUndefined();
 		expect(restored.observations).toEqual([]);
-		expect(restored.changedFiles).toEqual([]);
+		expect(restored.changedFiles).toEqual(["src/auth.ts"]);
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}
@@ -118,6 +119,31 @@ test("append APIs persist messages immediately and update the session index", as
 		const restored = await loadSession(cwd, "append-1");
 		expect(restored.messages).toEqual(nextState.messages);
 		expect(restored.turn).toBe(1);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("agent coordination messages persist without becoming user events", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "cagent-session-"));
+	try {
+		const state = createInitialState("hello", cwd, [], "agent-message-1");
+		const message = {
+			role: "agent" as const,
+			content: '[agent-coordination:untrusted]\n{"summary":"done"}',
+		};
+		await appendSessionMessage(cwd, state, message);
+		await appendSessionState(cwd, {
+			...state,
+			messages: [...state.messages, message],
+			changedFiles: ["src/agent-change.ts"],
+		});
+
+		const raw = await readFile(getSessionPath(cwd, "agent-message-1"), "utf8");
+		expect(raw).toContain('"type":"agent_message"');
+		const restored = await loadSession(cwd, "agent-message-1");
+		expect(restored.messages.at(-1)).toEqual(message);
+		expect(restored.changedFiles).toEqual(["src/agent-change.ts"]);
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}

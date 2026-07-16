@@ -231,3 +231,114 @@ test("plan approval prompt continues after approve", async () => {
 		await rm(cwd, { recursive: true, force: true });
 	}
 });
+
+class BackgroundAgentModelClient implements ModelClient {
+	readonly name = "background-agent";
+	readonly childEntered = deferredSignal();
+	readonly releaseChild = deferredSignal();
+	readonly mainRequests: ModelRequest[] = [];
+	private mainCallCount = 0;
+
+	async *stream(request: ModelRequest): AsyncGenerator<ModelStreamEvent> {
+		if (
+			request.messages.some(
+				(message) =>
+					message.role === "system" &&
+					message.content.includes("working for a parent coding agent"),
+			)
+		) {
+			this.childEntered.resolve();
+			await this.releaseChild.promise;
+			yield { type: "text_delta", content: "child investigation complete" };
+			return;
+		}
+
+		if (
+			request.messages.some(
+				(message) =>
+					message.role === "user" &&
+					message.content.includes("memory extraction sub-agent"),
+			)
+		) {
+			yield { type: "text_delta", content: "NO_MEMORY" };
+			return;
+		}
+
+		this.mainRequests.push(request);
+		this.mainCallCount++;
+		if (this.mainCallCount === 1) {
+			yield {
+				type: "tool_call",
+				id: "spawn-background",
+				name: "SpawnSubagent",
+				arguments: JSON.stringify({
+					task: "investigate in background",
+					agent_type: "explore",
+					run_in_background: true,
+				}),
+			};
+			return;
+		}
+		if (this.mainCallCount === 2) {
+			yield { type: "text_delta", content: "main is idle while child runs" };
+			return;
+		}
+		yield { type: "text_delta", content: "integrated background result" };
+	}
+}
+
+test("background completion wakes an idle main agent exactly once", async () => {
+	const cwd = await makeTempDir();
+	const model = new BackgroundAgentModelClient();
+	const { lastFrame, stdin, unmount } = render(<App cwd={cwd} model={model} />);
+
+	try {
+		await wait(100);
+		stdin.write("delegate this");
+		await wait(50);
+		stdin.write("\r");
+		await Promise.race([
+			model.childEntered.promise,
+			wait(2_000).then(() => {
+				throw new Error(`child did not start; frame=${lastFrame() ?? ""}`);
+			}),
+		]);
+		await waitForFrame(lastFrame, "main is idle while child runs");
+
+		model.releaseChild.resolve();
+		await waitForFrame(lastFrame, "integrated background result");
+		await waitForFrame(lastFrame, "Type a message and press Enter...");
+
+		const frame = lastFrame() ?? "";
+		expect(frame).toContain("sub-agent notification");
+		expect(model.mainRequests).toHaveLength(3);
+		expect(JSON.stringify(model.mainRequests[2])).toContain(
+			"child investigation complete",
+		);
+	} finally {
+		unmount();
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+function deferredSignal(): { promise: Promise<void>; resolve(): void } {
+	let resolve!: () => void;
+	const promise = new Promise<void>((next) => {
+		resolve = next;
+	});
+	return { promise, resolve };
+}
+
+async function waitForFrame(
+	lastFrame: () => string | undefined,
+	text: string,
+): Promise<void> {
+	const deadline = Date.now() + 2_000;
+	while (Date.now() < deadline) {
+		if (lastFrame()?.includes(text)) {
+			return;
+		}
+		await wait(20);
+	}
+	throw new Error(`timed out waiting for frame text: ${text}`);
+}

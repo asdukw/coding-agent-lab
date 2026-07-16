@@ -48,6 +48,7 @@ export type StoredSessionState = {
 	plan?: RuntimePlan;
 	messages: Message[];
 	toolExecutions?: ToolExecution[];
+	changedFiles?: string[];
 	turn: number;
 	budget: BudgetState;
 	compaction?: CompactionState;
@@ -84,7 +85,11 @@ export type SessionEvent =
 	| {
 			version: 2;
 			timestamp: string;
-			type: "user_message" | "assistant_message" | "tool_result";
+			type:
+				| "user_message"
+				| "agent_message"
+				| "assistant_message"
+				| "tool_result";
 			sessionId: string;
 			payload: {
 				message: Message;
@@ -114,6 +119,7 @@ export type SessionEvent =
 				budget: BudgetState;
 				compaction: CompactionState;
 				toolExecutions?: ToolExecution[];
+				changedFiles?: string[];
 			};
 	  }
 	| {
@@ -233,6 +239,7 @@ export async function appendSessionState(
 			budget: state.budget,
 			compaction: state.compaction,
 			toolExecutions: state.toolExecutions,
+			changedFiles: state.changedFiles,
 		},
 	});
 	await appendSessionIndex(cwd, state);
@@ -361,6 +368,7 @@ export async function saveSession(
 				budget: state.budget,
 				compaction: state.compaction,
 				toolExecutions,
+				changedFiles: state.changedFiles,
 			},
 		},
 	];
@@ -431,6 +439,7 @@ function replaySessionEvents(
 		cwd: fallbackCwd,
 		messages: [],
 		toolExecutions: [],
+		changedFiles: [],
 		turn: 0,
 		budget: { turnsUsed: 0, maxTurns: 20 },
 	};
@@ -511,9 +520,12 @@ function createMessageEvents(
 
 function messageEventType(
 	message: Message,
-): "user_message" | "assistant_message" | "tool_result" {
+): "user_message" | "agent_message" | "assistant_message" | "tool_result" {
 	if (message.role === "user") {
 		return "user_message";
+	}
+	if (message.role === "agent") {
+		return "agent_message";
 	}
 	if (message.role === "tool") {
 		return "tool_result";
@@ -540,7 +552,11 @@ function applyCurrentSessionEvent(
 		};
 	}
 
-	if (event.type === "user_message" || event.type === "assistant_message") {
+	if (
+		event.type === "user_message" ||
+		event.type === "agent_message" ||
+		event.type === "assistant_message"
+	) {
 		return {
 			...state,
 			messages: [...state.messages, event.payload.message],
@@ -584,6 +600,7 @@ function applyCurrentSessionEvent(
 			budget: event.payload.budget,
 			compaction: event.payload.compaction,
 			toolExecutions: event.payload.toolExecutions ?? state.toolExecutions,
+			changedFiles: event.payload.changedFiles ?? state.changedFiles,
 		};
 	}
 
@@ -651,6 +668,12 @@ function fromStoredSessionState(
 	const cwd = state.cwd ?? process.cwd();
 	const messages = state.messages ?? [];
 	return {
+		agent: {
+			id: state.sessionId ?? "",
+			type:
+				state.toolPermissionContext?.agentType === "memory" ? "memory" : "main",
+			depth: state.toolPermissionContext?.agentType === "memory" ? 1 : 0,
+		},
 		sessionId: state.sessionId ?? "",
 		task: state.task ?? "",
 		cwd,
@@ -666,7 +689,7 @@ function fromStoredSessionState(
 		toolExecutions: state.toolExecutions?.length
 			? state.toolExecutions
 			: deriveToolExecutions(messages),
-		changedFiles: [],
+		changedFiles: state.changedFiles ?? [],
 		turn: state.turn ?? budget.turnsUsed,
 		maxTurns: budget.maxTurns,
 		budget,

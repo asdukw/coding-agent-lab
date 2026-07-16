@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
+import type { AgentIdentity } from "./agents/identity";
 import type { ToolExecution } from "./toolExecutionMemory";
 import type { ToolSpec } from "./tools/types";
 
-export type Role = "user" | "assistant" | "tool" | "system";
+export type Role = "user" | "assistant" | "tool" | "system" | "agent";
 
 export type Message = {
 	role: Role;
@@ -11,6 +12,8 @@ export type Message = {
 	toolCalls?: { id: string; name: string; arguments: string }[];
 	/** Present on role:'tool' messages, linking back to the requesting call. */
 	toolCallId?: string;
+	/** Preserves the trust boundary when a system compaction summarizes agent data. */
+	containsUntrustedAgentContent?: boolean;
 };
 
 export type TodoItem = {
@@ -43,7 +46,7 @@ export type CompactionState = {
 };
 
 export type AgentMode = "normal" | "plan";
-export type AgentType = "main" | "memory";
+export type AgentType = "main" | "memory" | "subagent";
 
 export type PlanItemStatus = "pending" | "in_progress" | "completed";
 
@@ -85,6 +88,7 @@ export type TransitionReason =
 	| "permission_denied";
 
 export type AgentState = {
+	agent: AgentIdentity;
 	sessionId: string;
 	task: string;
 	cwd: string;
@@ -118,6 +122,11 @@ export function createInitialState(
 	sessionId = createSessionId(),
 ): AgentState {
 	return {
+		agent: {
+			id: sessionId,
+			type: "main",
+			depth: 0,
+		},
 		sessionId,
 		task,
 		cwd,
@@ -145,6 +154,7 @@ export function continueState(prev: AgentState, task: string): AgentState {
 		...ensureToolPermissionContext(prev),
 		task,
 		messages: [...prev.messages, { role: "user", content: task }],
+		budget: { ...prev.budget, turnsUsed: 0 },
 	};
 }
 
@@ -166,6 +176,12 @@ export function createToolPermissionContext(
 export function ensureToolPermissionContext(state: AgentState): AgentState {
 	return {
 		...state,
+		agent: state.agent ?? {
+			id: state.sessionId,
+			type:
+				state.toolPermissionContext?.agentType === "memory" ? "memory" : "main",
+			depth: state.toolPermissionContext?.agentType === "memory" ? 1 : 0,
+		},
 		toolPermissionContext: normalizeToolPermissionContext(
 			state.toolPermissionContext,
 			state.cwd,

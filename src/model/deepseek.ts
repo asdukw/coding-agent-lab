@@ -27,12 +27,15 @@ export class DeepSeekModelClient implements ModelClient {
 	}
 
 	async *stream(request: ModelRequest): AsyncGenerator<ModelStreamEvent> {
-		const stream = await this.client.chat.completions.create({
-			model: this.model,
-			messages: toOpenAIMessages(request),
-			tools: toOpenAITools(request.toolSpecs),
-			stream: true,
-		});
+		const stream = await this.client.chat.completions.create(
+			{
+				model: this.model,
+				messages: toOpenAIMessages(request),
+				tools: toOpenAITools(request.toolSpecs),
+				stream: true,
+			},
+			{ signal: request.signal },
+		);
 
 		const toolCalls = new Map<
 			number,
@@ -95,6 +98,9 @@ function toOpenAIMessages(request: ModelRequest): ChatCompletionMessageParam[] {
 				messages.push({ role: "system", content: message.content });
 				break;
 			case "user":
+				messages.push({ role: "user", content: message.content });
+				break;
+			case "agent":
 				messages.push({ role: "user", content: message.content });
 				break;
 			case "assistant":

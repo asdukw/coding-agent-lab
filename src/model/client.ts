@@ -4,6 +4,7 @@ import type { ToolSpec } from "../tools/types";
 export type ModelRequest = {
 	messages: Message[];
 	toolSpecs?: ToolSpec[];
+	signal?: AbortSignal;
 };
 
 export type ModelStreamEvent =

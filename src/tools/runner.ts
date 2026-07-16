@@ -1,3 +1,4 @@
+import type { AgentRuntime } from "../agents/types";
 import type { AgentState, Message, Observation } from "../state";
 import { authorizeToolCall } from "./permissions";
 import {
@@ -27,6 +28,8 @@ export type ToolCallResult = {
 export type ToolStateContext = {
 	getState(): AgentState;
 	setState(next: AgentState | ((state: AgentState) => AgentState)): void;
+	agentRuntime?: AgentRuntime;
+	signal?: AbortSignal;
 };
 
 type PreparedToolCall = {
@@ -52,15 +55,17 @@ export async function runToolCall({
 	tools,
 	context,
 	lockManager = runtimeResourceLock,
+	signal,
 }: {
 	call: ToolCallRequest;
 	tools: Tools;
 	context: ToolStateContext;
 	lockManager?: RuntimeResourceLock;
+	signal?: AbortSignal;
 }): Promise<ToolCallResult> {
 	try {
 		const prepared = await prepareToolCall(call, tools, context);
-		return await executePreparedToolCall(prepared, lockManager);
+		return await executePreparedToolCall(prepared, lockManager, signal);
 	} catch (caught) {
 		return failedToolCallResult(
 			call,
@@ -75,11 +80,13 @@ export async function runToolCalls({
 	tools,
 	context,
 	lockManager = runtimeResourceLock,
+	signal,
 }: {
 	calls: readonly ToolCallRequest[];
 	tools: Tools;
 	context: ToolStateContext;
 	lockManager?: RuntimeResourceLock;
+	signal?: AbortSignal;
 }): Promise<ToolCallResult[]> {
 	const prepared: Array<PreparedToolCall | ToolCallResult> = [];
 	for (const call of calls) {
@@ -99,7 +106,7 @@ export async function runToolCalls({
 
 	return Promise.all(
 		prepared.map((item) =>
-			"ok" in item ? item : executePreparedToolCall(item, lockManager),
+			"ok" in item ? item : executePreparedToolCall(item, lockManager, signal),
 		),
 	);
 }
@@ -143,10 +150,12 @@ async function prepareToolCall(
 async function executePreparedToolCall(
 	prepared: PreparedToolCall,
 	lockManager: RuntimeResourceLock,
+	signal?: AbortSignal,
 ): Promise<ToolCallResult> {
 	try {
-		const release = await lockManager.acquire(prepared.accesses);
+		const release = await lockManager.acquire(prepared.accesses, signal);
 		try {
+			throwIfAborted(signal);
 			const result = await prepared.tool.call(
 				prepared.args,
 				prepared.callContext,
@@ -209,7 +218,20 @@ function toolContext(context: ToolStateContext): ToolContext {
 	return {
 		getState: context.getState,
 		setState: context.setState,
+		agentRuntime: context.agentRuntime,
+		signal: context.signal,
 	};
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+	if (!signal?.aborted) {
+		return;
+	}
+	const error = new Error(
+		typeof signal.reason === "string" ? signal.reason : "tool call aborted",
+	);
+	error.name = "AbortError";
+	throw error;
 }
 
 function withSessionReadAccess(

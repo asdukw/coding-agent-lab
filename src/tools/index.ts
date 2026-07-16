@@ -1,3 +1,11 @@
+import {
+	AGENT_TOOLS,
+	cancelAgentTool,
+	listAgentsTool,
+	sendAgentMessageTool,
+	spawnSubagentTool,
+	waitAgentTool,
+} from "./agentTools";
 import { editTool } from "./editTool";
 import { globTool } from "./globTool";
 import { grepTool } from "./grepTool";
@@ -19,15 +27,21 @@ export const BUILTIN_TOOLS: Tools = [
 	enterPlanModeTool,
 	updatePlanTool,
 	exitPlanModeTool,
+	...AGENT_TOOLS,
 ];
 
 export {
+	cancelAgentTool,
 	editTool,
 	enterPlanModeTool,
 	exitPlanModeTool,
 	globTool,
 	grepTool,
+	listAgentsTool,
 	readTool,
+	sendAgentMessageTool,
+	spawnSubagentTool,
 	updatePlanTool,
+	waitAgentTool,
 	writeTool,
 };

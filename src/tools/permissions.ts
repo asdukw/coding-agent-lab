@@ -7,6 +7,12 @@ import {
 } from "../pathSafety";
 import type { AgentState } from "../state";
 import {
+	CANCEL_AGENT_TOOL_NAME,
+	LIST_AGENTS_TOOL_NAME,
+	SEND_AGENT_MESSAGE_TOOL_NAME,
+	WAIT_AGENT_TOOL_NAME,
+} from "./agentToolNames";
+import {
 	ENTER_PLAN_MODE_TOOL_NAME,
 	EXIT_PLAN_MODE_TOOL_NAME,
 	UPDATE_PLAN_TOOL_NAME,
@@ -26,6 +32,10 @@ const PLAN_MODE_TOOL_NAMES = new Set([
 	UPDATE_PLAN_TOOL_NAME,
 	EXIT_PLAN_MODE_TOOL_NAME,
 	ENTER_PLAN_MODE_TOOL_NAME,
+	LIST_AGENTS_TOOL_NAME,
+	WAIT_AGENT_TOOL_NAME,
+	SEND_AGENT_MESSAGE_TOOL_NAME,
+	CANCEL_AGENT_TOOL_NAME,
 ]);
 
 export function getToolsForMode(state: AgentState, tools: Tools): Tools {
@@ -60,7 +70,11 @@ export async function authorizeToolCall(
 		READ_ONLY_TOOL_NAMES.has(tool.name) ||
 		tool.name === ENTER_PLAN_MODE_TOOL_NAME ||
 		tool.name === EXIT_PLAN_MODE_TOOL_NAME ||
-		tool.name === UPDATE_PLAN_TOOL_NAME
+		tool.name === UPDATE_PLAN_TOOL_NAME ||
+		tool.name === LIST_AGENTS_TOOL_NAME ||
+		tool.name === WAIT_AGENT_TOOL_NAME ||
+		tool.name === SEND_AGENT_MESSAGE_TOOL_NAME ||
+		tool.name === CANCEL_AGENT_TOOL_NAME
 	) {
 		return;
 	}

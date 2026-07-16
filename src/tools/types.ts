@@ -1,11 +1,14 @@
 import type { z } from "zod";
 import { toJSONSchema } from "zod";
+import type { AgentRuntime } from "../agents/types";
 import type { AgentState } from "../state";
 import type { ResourceAccess } from "./resourceLock";
 
 export type ToolContext = {
 	getState(): AgentState;
 	setState(next: AgentState | ((state: AgentState) => AgentState)): void;
+	agentRuntime?: AgentRuntime;
+	signal?: AbortSignal;
 };
 
 export type Tool<Input = unknown, Output = unknown> = {

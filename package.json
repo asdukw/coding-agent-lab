@@ -9,7 +9,7 @@
 		"start": "bun run src/main.tsx",
 		"dev": "bun --watch src/main.tsx",
 		"check": "tsc --noEmit",
-		"test": "bun test tests/app.test.tsx tests/compact.test.ts tests/localCommands.test.ts tests/mcp.test.ts tests/memory.test.ts tests/memoryExtract.test.ts tests/deepseekConnectivity.test.ts tests/query.tool.test.ts tests/sessionStore.test.ts tests/tools.test.ts",
+		"test": "bun test tests/agentMailbox.test.ts tests/agentManager.test.ts tests/app.test.tsx tests/compact.test.ts tests/localCommands.test.ts tests/mcp.test.ts tests/memory.test.ts tests/memoryExtract.test.ts tests/deepseekConnectivity.test.ts tests/query.agentMessages.test.ts tests/query.tool.test.ts tests/sessionStore.test.ts tests/tools.test.ts",
 		"test:deepseek": "bun test tests/deepseekConnectivity.test.ts",
 		"lint": "biome check src tests package.json tsconfig.json",
 		"format": "biome format --write src tests package.json tsconfig.json",
@@ -17,7 +17,7 @@
 		"fix": "biome check --write src tests package.json tsconfig.json"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "^2.5.2",
+		"@biomejs/biome": "2.5.0",
 		"@types/bun": "latest",
 		"@types/react": "^19.2.17",
 		"ink-testing-library": "^4.0.0"

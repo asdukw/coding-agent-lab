@@ -81,6 +81,17 @@ export function recordCompletedToolExecution(
 	);
 }
 
+export function mergeToolExecutions(
+	executions: readonly ToolExecution[],
+	additions: readonly ToolExecution[],
+): ToolExecution[] {
+	let merged = executions.slice();
+	for (const addition of additions) {
+		merged = upsertToolExecution(merged, { ...addition });
+	}
+	return merged;
+}
+
 export function deriveToolExecutions(
 	messages: readonly Message[],
 ): ToolExecution[] {

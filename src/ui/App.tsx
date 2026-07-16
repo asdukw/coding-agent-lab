@@ -1,6 +1,7 @@
 import { Box, Text } from "ink";
 import TextInput from "ink-text-input";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { InProcessAgentManager } from "../agents/manager";
 import { ensureMemoryStore, formatMemoryStoreSummary } from "../memory";
 import { runMemoryExtractionSubAgent } from "../memoryExtract";
 import type { ModelClient } from "../model/client";
@@ -33,6 +34,8 @@ export type AppProps = {
 	mcpTools?: Tools;
 };
 
+const EMPTY_TOOLS: Tools = [];
+
 type Turn = {
 	id: string;
 	user: string;
@@ -51,6 +54,8 @@ function historyFromState(state: AgentState | undefined): Turn[] {
 	for (const message of state.messages) {
 		if (message.role === "user") {
 			pendingUser = message.content;
+		} else if (message.role === "agent") {
+			pendingUser = "Sub-agent update";
 		} else if (
 			message.role === "assistant" &&
 			pendingUser !== undefined &&
@@ -73,9 +78,17 @@ export function App({
 	cwd,
 	model,
 	initialState: restoredState,
-	mcpTools = [],
+	mcpTools = EMPTY_TOOLS,
 }: AppProps) {
 	const tools = useMemo(() => [...BUILTIN_TOOLS, ...mcpTools], [mcpTools]);
+	const agentRuntime = useMemo(
+		() =>
+			new InProcessAgentManager({
+				model,
+				getTools: () => tools,
+			}),
+		[model, tools],
+	);
 	const [modelName, setModelName] = useState<string | undefined>();
 	const [agentState, setAgentState] = useState<AgentState | undefined>(
 		restoredState,
@@ -87,6 +100,7 @@ export function App({
 	const [status, setStatus] = useState<"idle" | "running">("idle");
 	const [input, setInput] = useState("");
 	const [error, setError] = useState<string | undefined>();
+	const [agentInboxRevision, setAgentInboxRevision] = useState(0);
 
 	const runState = useCallback(
 		(
@@ -103,6 +117,7 @@ export function App({
 			setError(undefined);
 
 			let assistantText = "";
+			let latestState = initialState;
 
 			void (async () => {
 				try {
@@ -118,6 +133,7 @@ export function App({
 						initialState,
 						model,
 						tools,
+						agentRuntime,
 					})) {
 						if (event.type === "request_start") {
 							setModelName(event.model);
@@ -127,9 +143,11 @@ export function App({
 						} else if (event.type === "message") {
 							await appendSessionMessage(cwd, initialState, event.message);
 						} else if (event.type === "state") {
+							latestState = event.state;
 							await appendSessionState(cwd, event.state);
 							statePersisted = true;
 						} else if (event.type === "compaction") {
+							latestState = event.state;
 							await appendSessionCompaction(cwd, event.state);
 						} else if (event.type === "memory_extraction_request") {
 							void runMemoryExtractionSubAgent({
@@ -152,6 +170,7 @@ export function App({
 									);
 								});
 						} else if (event.type === "terminal") {
+							latestState = event.terminal.state;
 							if (!statePersisted) {
 								await appendSessionState(cwd, event.terminal.state);
 							}
@@ -169,12 +188,14 @@ export function App({
 						}
 					}
 				} catch (caught) {
+					setAgentState(latestState);
 					setError(caught instanceof Error ? caught.message : String(caught));
+					setStreamingText("");
 					setStatus("idle");
 				}
 			})();
 		},
-		[cwd, model, status, tools],
+		[agentRuntime, cwd, model, status, tools],
 	);
 
 	const runTurn = useCallback(
@@ -199,6 +220,37 @@ export function App({
 			runTurn(task);
 		}
 	}, []);
+
+	useEffect(
+		() =>
+			agentRuntime.subscribe((event) => {
+				if (event.type === "inbox") {
+					setAgentInboxRevision((revision) => revision + 1);
+				}
+			}),
+		[agentRuntime],
+	);
+
+	useEffect(() => {
+		return () => {
+			void agentRuntime.shutdown();
+		};
+	}, [agentRuntime]);
+
+	useEffect(() => {
+		void agentInboxRevision;
+		if (
+			status !== "idle" ||
+			!agentState ||
+			agentState.toolPermissionContext.pendingPlanApproval ||
+			agentState.transition?.reason === "max_turns" ||
+			agentState.budget.turnsUsed >= agentState.budget.maxTurns ||
+			!agentRuntime.hasPendingMessages(agentState.agent.id)
+		) {
+			return;
+		}
+		runState(agentState, "sub-agent notification", agentState.messages.length);
+	}, [agentInboxRevision, agentRuntime, agentState, runState, status]);
 
 	const handleSubmit = (value: string) => {
 		setInput("");

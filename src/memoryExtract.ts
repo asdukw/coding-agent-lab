@@ -107,6 +107,12 @@ async function executeMemoryExtraction(params: {
 				toToolSpecs(MEMORY_EXTRACTION_TOOLS),
 				subAgentSessionId,
 			),
+			agent: {
+				id: subAgentSessionId,
+				parentId: state.agent.id,
+				type: "memory",
+				depth: state.agent.depth + 1,
+			},
 			toolPermissionContext: createToolPermissionContext(state.cwd, {
 				agentType: "memory",
 			}),
@@ -407,6 +413,9 @@ function latestUserAssistantPair(
 		if (!assistant && message.role === "assistant" && message.content.trim()) {
 			assistant = message;
 			continue;
+		}
+		if (assistant && message.role === "agent") {
+			return undefined;
 		}
 		if (assistant && message.role === "user") {
 			return { user: message, assistant };
