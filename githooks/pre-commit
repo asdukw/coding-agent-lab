@@ -2,8 +2,5 @@
 
 set -eu
 
-echo "Running formatter..."
-bun run format
-
-echo "Running linter..."
-bun run lint
+echo "Checking formatting and lint..."
+bun run check:style
