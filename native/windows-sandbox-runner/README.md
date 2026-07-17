@@ -4,7 +4,7 @@
 
 ## 构建与安装
 
-前置条件：Windows 11 x64、`rustup`、`stable-x86_64-pc-windows-msvc`，以及带 C++ x64 工具链的 Visual Studio 2022 Build Tools/Community。
+前置条件：Windows 11 x64、`rustup`、`1.96.0-x86_64-pc-windows-msvc`，以及带 C++ x64 工具链的 Visual Studio 2022 Build Tools/Community。仓库内的 `rust-toolchain.toml` 同时固定该版本及 `rustfmt`、`clippy` 组件。
 
 在仓库根目录运行：
 
@@ -18,7 +18,14 @@ bun run build:sandbox
 %USERPROFILE%\AppData\Local\cagent\bin\cagent-windows-sandbox-runner.exe
 ```
 
-最终路径和 SHA256 会写到控制台。正式 MSVC 构建的 Cargo 中间产物位于 `%USERPROFILE%\AppData\Local\cagent\build\windows-sandbox-runner\`；脚本使用标准 rustup 用户安装位置、显式选择 `rustc`/`rustdoc`/`cargo`、清除常见编译 wrapper/flags，并带 `--locked` 构建。`stable` 仍是浮动 channel，因此这不是位级可复现构建。CLI 默认只从上述固定用户目录加载 helper，并校验它是 workspace 外的普通文件；当前不校验签名或发行哈希。
+CI 或只需要产物、不希望写入固定 helper 安装目录时，直接给脚本传入绝对 Cargo 目标目录，不要使用 `-Install`：
+
+```powershell
+$cargoTargetDir = Join-Path $env:TEMP "cagent-windows-sandbox-runner-target"
+.\scripts\build-windows-sandbox.ps1 -CargoTargetDir $cargoTargetDir
+```
+
+两种模式都会输出最终路径和 SHA256。安装模式的 Cargo 中间产物位于 `%USERPROFILE%\AppData\Local\cagent\build\windows-sandbox-runner\`；纯构建模式不会创建固定 helper 安装目录，Cargo target 输出位于指定目标目录。rustup 和 Cargo 仍可能读写各自的用户级工具链、registry 与下载缓存。脚本使用标准 rustup 用户安装位置、显式选择固定版本的 `rustc`/`rustdoc`/`cargo`、清除常见编译 wrapper/flags，并带 `--locked` 构建。Rust 与 Cargo 依赖已经固定，但 Visual Studio 和 Windows 构建环境尚未完全固定，因此仍不承诺位级可复现。CLI 默认只从上述固定用户目录加载 helper，并校验它是 workspace 外的普通文件；当前不校验签名或发行哈希。
 
 ## 执行流程
 

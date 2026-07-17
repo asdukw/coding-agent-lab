@@ -67,3 +67,47 @@ jobs:
 
       - name: Run offline tests
         run: bun run test:unit
+
+  windows-sandbox-runner:
+    name: Windows sandbox runner (Rust)
+    # The trusted build script intentionally targets Visual Studio 2022.
+    runs-on: windows-2022
+    timeout-minutes: 15
+    env:
+      # Keep this synchronized with rust-toolchain.toml and the build script.
+      RUST_TOOLCHAIN: 1.96.0-x86_64-pc-windows-msvc
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        run: >-
+          rustup toolchain install $env:RUST_TOOLCHAIN
+          --profile minimal
+          --component rustfmt
+          --component clippy
+          --target x86_64-pc-windows-msvc
+
+      - name: Check Rust formatting
+        working-directory: native/windows-sandbox-runner
+        run: rustup run $env:RUST_TOOLCHAIN cargo fmt --all -- --check
+
+      - name: Lint Rust
+        working-directory: native/windows-sandbox-runner
+        run: rustup run $env:RUST_TOOLCHAIN cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Test Rust
+        working-directory: native/windows-sandbox-runner
+        run: rustup run $env:RUST_TOOLCHAIN cargo test --locked
+
+      - name: Build release runner
+        run: |
+          $cargoTargetDir = Join-Path $env:RUNNER_TEMP "cagent-windows-sandbox-runner-target"
+          .\scripts\build-windows-sandbox.ps1 -CargoTargetDir $cargoTargetDir
+
+          $runnerPath = Join-Path $cargoTargetDir "x86_64-pc-windows-msvc\release\cagent-windows-sandbox-runner.exe"
+          if (-not (Test-Path -LiteralPath $runnerPath -PathType Leaf)) {
+            throw "Expected release runner was not produced: $runnerPath"
+          }

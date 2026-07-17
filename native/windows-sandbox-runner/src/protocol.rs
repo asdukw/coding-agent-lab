@@ -116,3 +116,111 @@ impl SandboxResponse {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn minimal_request() -> serde_json::Value {
+        json!({
+            "version": PROTOCOL_VERSION,
+            "request_id": "request-1",
+            "parent_pid": 1,
+            "cwd": "C:/workspace",
+            "writable_roots": ["C:/workspace"],
+            "timeout_ms": 100,
+            "max_output_bytes": 1024
+        })
+    }
+
+    #[test]
+    fn request_defaults_args_and_environment() {
+        let request: SandboxRequest =
+            serde_json::from_value(minimal_request()).expect("deserialize request");
+
+        assert!(request.args.is_empty());
+        assert!(request.env.is_empty());
+    }
+
+    #[test]
+    fn request_rejects_unknown_fields() {
+        let mut value = minimal_request();
+        value
+            .as_object_mut()
+            .expect("request object")
+            .insert("unexpected".to_owned(), json!(true));
+
+        let error = serde_json::from_value::<SandboxRequest>(value)
+            .expect_err("unknown field must be rejected");
+
+        assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn success_response_serializes_the_protocol_contract() {
+        let response = SandboxResponse::success(
+            "request-1".to_owned(),
+            7,
+            "stdout".to_owned(),
+            "stderr".to_owned(),
+            true,
+            true,
+            false,
+        );
+
+        let value = serde_json::to_value(response).expect("serialize success response");
+
+        assert_eq!(
+            value,
+            json!({
+                "status": "ok",
+                "request_id": "request-1",
+                "exit_code": 7,
+                "stdout": "stdout",
+                "stderr": "stderr",
+                "timed_out": true,
+                "stdout_truncated": true,
+                "stderr_truncated": false,
+                "error": null,
+                "enforcement": {
+                    "filesystem": "write_restricted_acl",
+                    "process_tree": "job_members_kill_on_close",
+                    "network": "inherited_not_isolated"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn error_response_serializes_the_protocol_contract() {
+        let response =
+            SandboxResponse::error("request-1", "create_process", "access denied", Some(5));
+
+        let value = serde_json::to_value(response).expect("serialize error response");
+
+        assert_eq!(
+            value,
+            json!({
+                "status": "error",
+                "request_id": "request-1",
+                "exit_code": null,
+                "stdout": "",
+                "stderr": "",
+                "timed_out": false,
+                "stdout_truncated": false,
+                "stderr_truncated": false,
+                "error": {
+                    "stage": "create_process",
+                    "message": "access denied",
+                    "windows_error_code": 5
+                },
+                "enforcement": {
+                    "filesystem": "write_restricted_acl",
+                    "process_tree": "job_members_kill_on_close",
+                    "network": "inherited_not_isolated"
+                }
+            })
+        );
+    }
+}

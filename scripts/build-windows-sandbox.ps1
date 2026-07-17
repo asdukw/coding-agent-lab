@@ -1,10 +1,13 @@
 [CmdletBinding()]
-param()
+param(
+	[switch]$Install,
+	[string]$CargoTargetDir
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$toolchain = "stable-x86_64-pc-windows-msvc"
+$toolchain = "1.96.0-x86_64-pc-windows-msvc"
 $target = "x86_64-pc-windows-msvc"
 $binaryName = "cagent-windows-sandbox-runner.exe"
 
@@ -18,11 +21,29 @@ $userProfile = [System.Environment]::GetFolderPath([System.Environment+SpecialFo
 if ([string]::IsNullOrWhiteSpace($userProfile)) {
 	throw "Windows did not return the current user's profile directory."
 }
-$localAppData = Join-Path $userProfile "AppData\Local"
-$targetDir = Join-Path $localAppData "cagent\build\windows-sandbox-runner"
+
+if ($Install) {
+	if ($PSBoundParameters.ContainsKey("CargoTargetDir")) {
+		throw "-CargoTargetDir cannot be used with -Install."
+	}
+	$localAppData = Join-Path $userProfile "AppData\Local"
+	$targetDir = Join-Path $localAppData "cagent\build\windows-sandbox-runner"
+	$destinationDir = Join-Path $localAppData "cagent\bin"
+	$destinationPath = Join-Path $destinationDir $binaryName
+} else {
+	if (-not $PSBoundParameters.ContainsKey("CargoTargetDir") -or [string]::IsNullOrWhiteSpace($CargoTargetDir)) {
+		throw "An absolute -CargoTargetDir is required when building without -Install."
+	}
+	if (
+		-not [System.IO.Path]::IsPathRooted($CargoTargetDir) -or
+		$CargoTargetDir -match "^[A-Za-z]:(?:$|[^\\/])" -or
+		$CargoTargetDir -match "^[\\/](?![\\/])"
+	) {
+		throw "-CargoTargetDir must be an absolute filesystem path: $CargoTargetDir"
+	}
+	$targetDir = [System.IO.Path]::GetFullPath($CargoTargetDir)
+}
 $sourcePath = Join-Path $targetDir "$target\release\$binaryName"
-$destinationDir = Join-Path $localAppData "cagent\bin"
-$destinationPath = Join-Path $destinationDir $binaryName
 
 if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
 	throw "Sandbox runner manifest not found: $manifestPath"
@@ -126,47 +147,52 @@ if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
 	throw "Expected sandbox runner was not produced: $sourcePath"
 }
 
-New-Item -ItemType Directory -Path $destinationDir -Force | Out-Null
-$stagedPath = Join-Path $destinationDir ".$binaryName.$([guid]::NewGuid().ToString('N')).tmp"
-$backupPath = Join-Path $destinationDir ".$binaryName.$([guid]::NewGuid().ToString('N')).bak"
-$installError = $null
-$cleanupError = $null
-$installSucceeded = $false
-try {
-	Copy-Item -LiteralPath $sourcePath -Destination $stagedPath
-	if (Test-Path -LiteralPath $destinationPath -PathType Leaf) {
-		[System.IO.File]::Replace($stagedPath, $destinationPath, $backupPath, $true)
-	} else {
-		[System.IO.File]::Move($stagedPath, $destinationPath)
-	}
-	$installSucceeded = $true
-} catch {
-	$installError = $_
-}
-if (Test-Path -LiteralPath $stagedPath -PathType Leaf) {
+if ($Install) {
+	New-Item -ItemType Directory -Path $destinationDir -Force | Out-Null
+	$stagedPath = Join-Path $destinationDir ".$binaryName.$([guid]::NewGuid().ToString('N')).tmp"
+	$backupPath = Join-Path $destinationDir ".$binaryName.$([guid]::NewGuid().ToString('N')).bak"
+	$installError = $null
+	$cleanupError = $null
+	$installSucceeded = $false
 	try {
-		Remove-Item -LiteralPath $stagedPath -Force
+		Copy-Item -LiteralPath $sourcePath -Destination $stagedPath
+		if (Test-Path -LiteralPath $destinationPath -PathType Leaf) {
+			[System.IO.File]::Replace($stagedPath, $destinationPath, $backupPath, $true)
+		} else {
+			[System.IO.File]::Move($stagedPath, $destinationPath)
+		}
+		$installSucceeded = $true
 	} catch {
-		$cleanupError = $_
+		$installError = $_
 	}
-}
-if ($installSucceeded -and (Test-Path -LiteralPath $backupPath -PathType Leaf)) {
-	try {
-		Remove-Item -LiteralPath $backupPath -Force
-	} catch {
-		$cleanupError = $_
+	if (Test-Path -LiteralPath $stagedPath -PathType Leaf) {
+		try {
+			Remove-Item -LiteralPath $stagedPath -Force
+		} catch {
+			$cleanupError = $_
+		}
 	}
-} elseif (Test-Path -LiteralPath $backupPath -PathType Leaf) {
-	Write-Warning "Installation failed; retained recovery backup at $backupPath"
-}
-if ($null -ne $installError) {
-	throw $installError
-}
-if ($null -ne $cleanupError) {
-	throw $cleanupError
+	if ($installSucceeded -and (Test-Path -LiteralPath $backupPath -PathType Leaf)) {
+		try {
+			Remove-Item -LiteralPath $backupPath -Force
+		} catch {
+			$cleanupError = $_
+		}
+	} elseif (Test-Path -LiteralPath $backupPath -PathType Leaf) {
+		Write-Warning "Installation failed; retained recovery backup at $backupPath"
+	}
+	if ($null -ne $installError) {
+		throw $installError
+	}
+	if ($null -ne $cleanupError) {
+		throw $cleanupError
+	}
+	$resultPath = $destinationPath
+} else {
+	$resultPath = $sourcePath
 }
 
-$stream = [System.IO.File]::OpenRead($destinationPath)
+$stream = [System.IO.File]::OpenRead($resultPath)
 try {
 	$sha256 = [System.Security.Cryptography.SHA256]::Create()
 	try {
@@ -178,5 +204,9 @@ try {
 } finally {
 	$stream.Dispose()
 }
-Write-Output "Built and installed $destinationPath"
+if ($Install) {
+	Write-Output "Built and installed $resultPath"
+} else {
+	Write-Output "Built $resultPath"
+}
 Write-Output "SHA256 $hash"

@@ -1207,3 +1207,172 @@ fn normalized_path_key(path: &Path) -> String {
         .trim_end_matches('\\')
         .to_owned()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_parent_pid() -> u32 {
+        let current = std::process::id();
+        if current == u32::MAX {
+            current - 1
+        } else {
+            current + 1
+        }
+    }
+
+    fn valid_request() -> SandboxRequest {
+        SandboxRequest {
+            version: crate::protocol::PROTOCOL_VERSION,
+            request_id: "request-1".to_owned(),
+            parent_pid: valid_parent_pid(),
+            args: Vec::new(),
+            cwd: "C:/workspace".to_owned(),
+            writable_roots: vec!["C:/workspace".to_owned()],
+            env: std::collections::BTreeMap::new(),
+            timeout_ms: MIN_TIMEOUT_MS,
+            max_output_bytes: MIN_OUTPUT_BYTES,
+        }
+    }
+
+    fn assert_validation_error(request: &SandboxRequest, expected_message: &str) {
+        let error =
+            validate_request_shape(request).expect_err("request validation must reject the input");
+        assert_eq!(error.stage, "validate_request");
+        assert!(error.windows_error_code.is_none());
+        assert!(
+            error.message.contains(expected_message),
+            "unexpected validation message: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn valid_request_shape_is_accepted() {
+        assert!(validate_request_shape(&valid_request()).is_ok());
+    }
+
+    #[test]
+    fn request_id_boundaries_and_character_set_are_enforced() {
+        let mut request = valid_request();
+        request.request_id = "a".repeat(MAX_REQUEST_ID_BYTES);
+        assert!(validate_request_shape(&request).is_ok());
+
+        request.request_id = "Az09-_.:".to_owned();
+        assert!(validate_request_shape(&request).is_ok());
+
+        for value in ["", "has space", "has/slash", "non-ascii-é"] {
+            request.request_id = value.to_owned();
+            assert_validation_error(&request, "request_id");
+        }
+
+        request.request_id = "a".repeat(MAX_REQUEST_ID_BYTES + 1);
+        assert_validation_error(&request, "request_id");
+
+        request.request_id = "has\0nul".to_owned();
+        assert_validation_error(&request, "must not contain NUL");
+    }
+
+    #[test]
+    fn parent_pid_must_not_be_zero_or_the_runner() {
+        let mut request = valid_request();
+        request.parent_pid = 0;
+        assert_validation_error(&request, "parent_pid");
+
+        request.parent_pid = std::process::id();
+        assert_validation_error(&request, "parent_pid");
+    }
+
+    #[test]
+    fn collection_limits_are_inclusive() {
+        let mut request = valid_request();
+        request.args = vec![String::new(); MAX_ARGUMENTS];
+        assert!(validate_request_shape(&request).is_ok());
+        request.args.push(String::new());
+        assert_validation_error(&request, "args exceeds");
+
+        let mut request = valid_request();
+        request.writable_roots = vec!["C:/workspace".to_owned(); MAX_WRITABLE_ROOTS];
+        assert!(validate_request_shape(&request).is_ok());
+        request.writable_roots.push("C:/other".to_owned());
+        assert_validation_error(&request, "writable_roots exceeds");
+
+        let mut request = valid_request();
+        request.env = (0..MAX_ENVIRONMENT_ENTRIES)
+            .map(|index| (format!("KEY_{index}"), String::new()))
+            .collect();
+        assert!(validate_request_shape(&request).is_ok());
+        request
+            .env
+            .insert("KEY_OVER_THE_LIMIT".to_owned(), String::new());
+        assert_validation_error(&request, "env exceeds");
+    }
+
+    #[test]
+    fn nul_is_rejected_in_all_request_string_locations() {
+        let mut request = valid_request();
+        request.cwd = "C:/work\0space".to_owned();
+        assert_validation_error(&request, "cwd must not contain NUL");
+
+        let mut request = valid_request();
+        request.args.push("argument\0value".to_owned());
+        assert_validation_error(&request, "args[0] must not contain NUL");
+
+        let mut request = valid_request();
+        request.writable_roots[0] = "C:/work\0space".to_owned();
+        assert_validation_error(&request, "writable_roots[0] must not contain NUL");
+
+        let mut request = valid_request();
+        request
+            .env
+            .insert("BAD\0NAME".to_owned(), "value".to_owned());
+        assert_validation_error(&request, "environment variable name must not contain NUL");
+
+        let mut request = valid_request();
+        request
+            .env
+            .insert("NAME".to_owned(), "bad\0value".to_owned());
+        assert_validation_error(&request, "environment variable NAME must not contain NUL");
+    }
+
+    #[test]
+    fn environment_names_are_validated_case_insensitively() {
+        let mut request = valid_request();
+        request.env.insert(String::new(), "value".to_owned());
+        assert_validation_error(&request, "is invalid");
+
+        let mut request = valid_request();
+        request.env.insert("A=B".to_owned(), "value".to_owned());
+        assert_validation_error(&request, "is invalid");
+
+        let mut request = valid_request();
+        request.env.insert("Path".to_owned(), "first".to_owned());
+        request.env.insert("PATH".to_owned(), "second".to_owned());
+        assert_validation_error(&request, "duplicated with different casing");
+    }
+
+    #[test]
+    fn timeout_and_output_limits_are_inclusive() {
+        for timeout_ms in [MIN_TIMEOUT_MS, MAX_TIMEOUT_MS] {
+            let mut request = valid_request();
+            request.timeout_ms = timeout_ms;
+            assert!(validate_request_shape(&request).is_ok());
+        }
+        for timeout_ms in [MIN_TIMEOUT_MS - 1, MAX_TIMEOUT_MS + 1] {
+            let mut request = valid_request();
+            request.timeout_ms = timeout_ms;
+            assert_validation_error(&request, "timeout_ms must be between");
+        }
+
+        for max_output_bytes in [MIN_OUTPUT_BYTES, MAX_OUTPUT_BYTES] {
+            let mut request = valid_request();
+            request.max_output_bytes = max_output_bytes;
+            assert!(validate_request_shape(&request).is_ok());
+        }
+        for max_output_bytes in [MIN_OUTPUT_BYTES - 1, MAX_OUTPUT_BYTES + 1] {
+            let mut request = valid_request();
+            request.max_output_bytes = max_output_bytes;
+            assert_validation_error(&request, "max_output_bytes must be between");
+        }
+    }
+}

@@ -46,7 +46,7 @@ Windows 上的 Shell 工具使用独立 Rust runner 创建受限进程。首次�
 bun run build:sandbox
 ```
 
-该命令显式选择 `stable-x86_64-pc-windows-msvc` release toolchain，并通过同目录替换安装到固定用户目录：
+该命令显式选择固定的 `1.96.0-x86_64-pc-windows-msvc` release toolchain，并通过同目录替换安装到固定用户目录：
 
 ```text
 %USERPROFILE%\AppData\Local\cagent\bin\cagent-windows-sandbox-runner.exe

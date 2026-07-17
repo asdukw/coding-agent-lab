@@ -9,7 +9,7 @@
 	"scripts": {
 		"start": "bun --no-env-file src/main.tsx",
 		"dev": "bun --no-env-file --watch src/main.tsx",
-		"build:sandbox": "\"$SYSTEMROOT/System32/WindowsPowerShell/v1.0/powershell.exe\" -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows-sandbox.ps1",
+		"build:sandbox": "\"$SYSTEMROOT/System32/WindowsPowerShell/v1.0/powershell.exe\" -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows-sandbox.ps1 -Install",
 		"check": "tsc --noEmit",
 		"test": "bun run test:unit",
 		"test:unit": "bun test --path-ignore-patterns=tests/deepseekConnectivity.test.ts",

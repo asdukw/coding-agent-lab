@@ -298,7 +298,7 @@ fn set_path_ace(
         }
     }
 
-    let mut explicit = EXPLICIT_ACCESS_W {
+    let explicit = EXPLICIT_ACCESS_W {
         grfAccessPermissions: mask,
         grfAccessMode: mode,
         grfInheritance: inheritance,
@@ -311,7 +311,7 @@ fn set_path_ace(
         },
     };
     let mut updated_acl: *mut ACL = ptr::null_mut();
-    let acl_result = unsafe { SetEntriesInAclW(1, &mut explicit, current_acl, &mut updated_acl) };
+    let acl_result = unsafe { SetEntriesInAclW(1, &explicit, current_acl, &mut updated_acl) };
     if acl_result != ERROR_SUCCESS {
         unsafe {
             LocalFree(security_descriptor as HLOCAL);
@@ -498,9 +498,7 @@ pub fn create_restricted_token(
     // from their parent directory. The token default DACL must not stamp every
     // newly created object with all workspace SIDs: a failed profile cleanup
     // would then leave a workspace-capability-writable object outside workspace.
-    let mut default_dacl_sids = Vec::with_capacity(2);
-    default_dacl_sids.push(user_sid.as_mut_ptr() as *mut c_void);
-    default_dacl_sids.push(profile_sid.as_ptr());
+    let default_dacl_sids = vec![user_sid.as_mut_ptr() as *mut c_void, profile_sid.as_ptr()];
     set_default_dacl(token.raw(), &default_dacl_sids)?;
     enable_change_notify(token.raw())?;
     Ok(token)
