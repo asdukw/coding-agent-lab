@@ -22,10 +22,21 @@ async function makeTempDir(): Promise<string> {
 	return mkdtemp(join(tmpdir(), "cagent-app-"));
 }
 
+async function removeTempDir(path: string): Promise<void> {
+	await rm(path, {
+		recursive: true,
+		force: true,
+		maxRetries: 10,
+		retryDelay: 50,
+	});
+}
+
 test("interactive dialog box drives a multi-turn conversation", async () => {
 	const cwd = await makeTempDir();
 	const model = new StubModelClient();
-	const { lastFrame, stdin, unmount } = render(<App cwd={cwd} model={model} />);
+	const { lastFrame, stdin, unmount } = render(
+		<App cwd={cwd} model={model} enableMemoryExtraction={false} />,
+	);
 
 	try {
 		await waitForInputReady(lastFrame, "Type a message and press Enter...");
@@ -70,7 +81,7 @@ test("interactive dialog box drives a multi-turn conversation", async () => {
 		expect(frame).toContain("Stub agent received task: second message");
 	} finally {
 		unmount();
-		await rm(cwd, { recursive: true, force: true });
+		await removeTempDir(cwd);
 	}
 });
 
@@ -92,7 +103,9 @@ test("resume slash command restores a saved session", async () => {
 	};
 	await saveSession(cwd, state);
 
-	const { lastFrame, stdin, unmount } = render(<App cwd={cwd} model={model} />);
+	const { lastFrame, stdin, unmount } = render(
+		<App cwd={cwd} model={model} enableMemoryExtraction={false} />,
+	);
 
 	try {
 		await waitForInputReady(lastFrame, "Type a message and press Enter...");
@@ -111,7 +124,7 @@ test("resume slash command restores a saved session", async () => {
 		expect(frame).toContain("old answer");
 	} finally {
 		unmount();
-		await rm(cwd, { recursive: true, force: true });
+		await removeTempDir(cwd);
 	}
 });
 
@@ -128,7 +141,9 @@ class FailingModelClient implements ModelClient {
 test("/plan enters plan mode locally without calling the model", async () => {
 	const cwd = await makeTempDir();
 	const model = new FailingModelClient();
-	const { lastFrame, stdin, unmount } = render(<App cwd={cwd} model={model} />);
+	const { lastFrame, stdin, unmount } = render(
+		<App cwd={cwd} model={model} enableMemoryExtraction={false} />,
+	);
 
 	try {
 		await waitForInputReady(lastFrame, "Type a message and press Enter...");
@@ -149,14 +164,16 @@ test("/plan enters plan mode locally without calling the model", async () => {
 		expect(model.called).toBe(false);
 	} finally {
 		unmount();
-		await rm(cwd, { recursive: true, force: true });
+		await removeTempDir(cwd);
 	}
 });
 
 test("/memory initializes the memory store locally without calling the model", async () => {
 	const cwd = await makeTempDir();
 	const model = new FailingModelClient();
-	const { lastFrame, stdin, unmount } = render(<App cwd={cwd} model={model} />);
+	const { lastFrame, stdin, unmount } = render(
+		<App cwd={cwd} model={model} enableMemoryExtraction={false} />,
+	);
 
 	try {
 		await waitForInputReady(lastFrame, "Type a message and press Enter...");
@@ -180,7 +197,7 @@ test("/memory initializes the memory store locally without calling the model", a
 		).toBe("# Memory\n\n");
 	} finally {
 		unmount();
-		await rm(cwd, { recursive: true, force: true });
+		await removeTempDir(cwd);
 	}
 });
 
@@ -227,7 +244,9 @@ class PlanApprovalModelClient implements ModelClient {
 test("plan approval prompt continues after approve", async () => {
 	const cwd = await makeTempDir();
 	const model = new PlanApprovalModelClient();
-	const { lastFrame, stdin, unmount } = render(<App cwd={cwd} model={model} />);
+	const { lastFrame, stdin, unmount } = render(
+		<App cwd={cwd} model={model} enableMemoryExtraction={false} />,
+	);
 
 	try {
 		await waitForInputReady(lastFrame, "Type a message and press Enter...");
@@ -264,7 +283,7 @@ test("plan approval prompt continues after approve", async () => {
 		expect(frame).toContain("implementation started");
 	} finally {
 		unmount();
-		await rm(cwd, { recursive: true, force: true });
+		await removeTempDir(cwd);
 	}
 });
 
@@ -296,7 +315,9 @@ test("tool approval prompt resumes the original call after allow", async () => {
 	const cwd = await makeTempDir();
 	const filePath = join(cwd, "approved.txt");
 	const model = new ToolApprovalModelClient(filePath);
-	const { lastFrame, stdin, unmount } = render(<App cwd={cwd} model={model} />);
+	const { lastFrame, stdin, unmount } = render(
+		<App cwd={cwd} model={model} enableMemoryExtraction={false} />,
+	);
 
 	try {
 		await waitForInputReady(lastFrame, "Type a message and press Enter...");
@@ -328,7 +349,7 @@ test("tool approval prompt resumes the original call after allow", async () => {
 		expect(await readFile(filePath, "utf8")).toBe("approved content");
 	} finally {
 		unmount();
-		await rm(cwd, { recursive: true, force: true });
+		await removeTempDir(cwd);
 	}
 });
 
@@ -390,7 +411,9 @@ class BackgroundAgentModelClient implements ModelClient {
 test("background completion wakes an idle main agent exactly once", async () => {
 	const cwd = await makeTempDir();
 	const model = new BackgroundAgentModelClient();
-	const { lastFrame, stdin, unmount } = render(<App cwd={cwd} model={model} />);
+	const { lastFrame, stdin, unmount } = render(
+		<App cwd={cwd} model={model} enableMemoryExtraction={false} />,
+	);
 
 	try {
 		await waitForInputReady(lastFrame, "Type a message and press Enter...");
@@ -423,7 +446,7 @@ test("background completion wakes an idle main agent exactly once", async () => 
 		);
 	} finally {
 		unmount();
-		await rm(cwd, { recursive: true, force: true });
+		await removeTempDir(cwd);
 	}
 });
 

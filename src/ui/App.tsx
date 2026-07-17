@@ -34,6 +34,7 @@ export type AppProps = {
 	model: ModelClient;
 	initialState?: AgentState;
 	mcpTools?: Tools;
+	enableMemoryExtraction?: boolean;
 };
 
 const EMPTY_TOOLS: Tools = [];
@@ -81,6 +82,7 @@ export function App({
 	model,
 	initialState: restoredState,
 	mcpTools = EMPTY_TOOLS,
+	enableMemoryExtraction = true,
 }: AppProps) {
 	const tools = useMemo(() => [...BUILTIN_TOOLS, ...mcpTools], [mcpTools]);
 	const agentRuntime = useMemo(
@@ -138,6 +140,7 @@ export function App({
 						model,
 						tools,
 						agentRuntime,
+						enableMemoryExtraction,
 					})) {
 						if (event.type === "request_start") {
 							setModelName(event.model);
@@ -200,7 +203,7 @@ export function App({
 				}
 			})();
 		},
-		[agentRuntime, cwd, model, tools],
+		[agentRuntime, cwd, enableMemoryExtraction, model, tools],
 	);
 
 	const runTurn = useCallback(
