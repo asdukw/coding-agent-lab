@@ -9,7 +9,7 @@ async function makeTempDir(): Promise<string> {
 	return mkdtemp(join(tmpdir(), "cagent-mcp-"));
 }
 
-test("discovers stdio MCP tools and registers their original schema", async () => {
+test("discovers MCP tools while treating server annotations as untrusted", async () => {
 	const cwd = await makeTempDir();
 	const calls: { name: string; arguments: Record<string, unknown> }[] = [];
 	let closed = false;
@@ -67,7 +67,13 @@ test("discovers stdio MCP tools and registers their original schema", async () =
 			{
 				namespace: "mcp",
 				key: "demo server",
-				mode: "read",
+				mode: "write",
+				scope: "exact",
+			},
+			{
+				namespace: "runtime",
+				key: "opaque-tools",
+				mode: "write",
 				scope: "exact",
 			},
 		]);

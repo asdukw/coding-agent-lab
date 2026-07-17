@@ -550,7 +550,7 @@ test("main agent cannot bypass memory validation through a directory alias", asy
 	}
 });
 
-test("main agent cannot bypass memory validation through outside hardlinks", async () => {
+test("main agent rejects outside hardlinks to memory files", async () => {
 	const cwd = await makeTempDir();
 	try {
 		await ensureMemoryStore(cwd);
@@ -583,6 +583,9 @@ test("main agent cannot bypass memory validation through outside hardlinks", asy
 			}
 		}
 		expect(terminal?.state.observations[0]?.ok).toBe(false);
+		expect(terminal?.state.observations[0]?.output).toContain(
+			"multiple hard links",
+		);
 		expect(await readFile(topicPath, "utf8")).toBe(topicContent);
 
 		const indexPath = getMemoryIndexPath(cwd);
@@ -601,7 +604,7 @@ test("main agent cannot bypass memory validation through outside hardlinks", asy
 		}
 		expect(terminal?.state.observations[0]?.ok).toBe(false);
 		expect(terminal?.state.observations[0]?.output).toContain(
-			"MEMORY.md is managed automatically",
+			"multiple hard links",
 		);
 		expect(await readFile(indexPath, "utf8")).toBe(originalIndex);
 	} finally {

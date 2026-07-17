@@ -142,7 +142,10 @@ test("agent coordination messages persist without becoming user events", async (
 		const raw = await readFile(getSessionPath(cwd, "agent-message-1"), "utf8");
 		expect(raw).toContain('"type":"agent_message"');
 		const restored = await loadSession(cwd, "agent-message-1");
-		expect(restored.messages.at(-1)).toEqual(message);
+		expect(restored.messages.at(-1)).toEqual({
+			...message,
+			containsUntrustedAgentContent: true,
+		});
 		expect(restored.changedFiles).toEqual(["src/agent-change.ts"]);
 	} finally {
 		await rm(cwd, { recursive: true, force: true });

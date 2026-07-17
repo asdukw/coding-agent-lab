@@ -408,6 +408,11 @@ test("restored approval cannot hide another call behind an always grant", async 
 		expect(
 			refreshed.state.toolPermissionContext.pendingToolApproval?.requests,
 		).toHaveLength(2);
+		expect(
+			refreshed.state.toolPermissionContext.pendingToolApproval?.requests.map(
+				(request) => request.callId,
+			),
+		).toEqual(["benign-shell", "hidden-shell"]);
 		expect(refreshed.state.toolPermissionContext.sessionAllowedTools).toEqual(
 			[],
 		);

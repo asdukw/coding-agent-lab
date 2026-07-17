@@ -342,6 +342,11 @@ function approvalForCall(
 	callId: string | undefined,
 ): "allow" | "deny" | undefined {
 	const pending = state.toolPermissionContext.pendingToolApproval;
+	// A writable session file cannot carry an approval decision across restore.
+	// Rebuild the complete request set before accepting a fresh user decision.
+	if (pending?.needsRevalidation) {
+		return undefined;
+	}
 	if (pending?.decision) {
 		if (
 			callId === undefined ||
