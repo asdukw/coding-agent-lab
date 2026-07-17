@@ -3,7 +3,10 @@ import {
 	access,
 	appendFile,
 	mkdir,
+	open,
 	readFile,
+	rename,
+	rm,
 	writeFile,
 } from "node:fs/promises";
 import { dirname, relative, resolve, sep } from "node:path";
@@ -33,6 +36,9 @@ const SESSION_DIR = ".cagent/sessions";
 const SESSION_ID_PATTERN = /^[A-Za-z0-9._-]+$/;
 const SESSION_INDEX_FILE = "session_index.jsonl";
 const MEMORY_EXTRACTION_AUDIT_DIR = ".cagent/audit/memory-extraction";
+// Serialize asynchronous writers within this process. Cross-process locking is a
+// separate sandbox/runtime concern and is not provided by this queue.
+const writeTails = new Map<string, Promise<void>>();
 
 export type SessionMemoryExtractionResult = {
 	subAgentSessionId: string;
@@ -194,11 +200,19 @@ export async function ensureSessionStarted(
 	state: AgentState,
 ): Promise<string> {
 	const path = getSessionPath(cwd, state.sessionId);
+	return serializeWrite(path, () => ensureSessionStartedUnlocked(cwd, state));
+}
+
+async function ensureSessionStartedUnlocked(
+	cwd: string,
+	state: AgentState,
+): Promise<string> {
+	const path = getSessionPath(cwd, state.sessionId);
 	if (await pathExists(path)) {
 		return path;
 	}
 
-	await appendSessionEvent(cwd, {
+	await appendSessionEventUnlocked(cwd, {
 		version: 2,
 		timestamp: new Date().toISOString(),
 		type: "session_meta",
@@ -217,54 +231,63 @@ export async function appendSessionMessage(
 	state: AgentState,
 	message: Message,
 ): Promise<void> {
-	await ensureSessionStarted(cwd, state);
-	for (const event of createMessageEvents(state.sessionId, message)) {
-		await appendSessionEvent(cwd, event);
-	}
+	const path = getSessionPath(cwd, state.sessionId);
+	await serializeWrite(path, async () => {
+		await ensureSessionStartedUnlocked(cwd, state);
+		for (const event of createMessageEvents(state.sessionId, message)) {
+			await appendSessionEventUnlocked(cwd, event);
+		}
+	});
 }
 
 export async function appendSessionState(
 	cwd: string,
 	state: AgentState,
 ): Promise<void> {
-	await ensureSessionStarted(cwd, state);
-	await appendSessionEvent(cwd, {
-		version: 2,
-		timestamp: new Date().toISOString(),
-		type: "state_snapshot",
-		sessionId: state.sessionId,
-		payload: {
-			task: state.task,
-			toolPermissionContext: persistableToolPermissionContext(
-				state.toolPermissionContext,
-			),
-			plan: state.plan,
-			turn: state.turn,
-			budget: state.budget,
-			compaction: state.compaction,
-			toolExecutions: state.toolExecutions,
-			changedFiles: state.changedFiles,
-		},
+	const path = getSessionPath(cwd, state.sessionId);
+	await serializeWrite(path, async () => {
+		await ensureSessionStartedUnlocked(cwd, state);
+		await appendSessionEventUnlocked(cwd, {
+			version: 2,
+			timestamp: new Date().toISOString(),
+			type: "state_snapshot",
+			sessionId: state.sessionId,
+			payload: {
+				task: state.task,
+				toolPermissionContext: persistableToolPermissionContext(
+					state.toolPermissionContext,
+				),
+				plan: state.plan,
+				turn: state.turn,
+				budget: state.budget,
+				compaction: state.compaction,
+				toolExecutions: state.toolExecutions,
+				changedFiles: state.changedFiles,
+			},
+		});
+		await appendSessionIndex(cwd, state);
 	});
-	await appendSessionIndex(cwd, state);
 }
 
 export async function appendSessionCompaction(
 	cwd: string,
 	state: AgentState,
 ): Promise<void> {
-	await ensureSessionStarted(cwd, state);
-	await appendSessionEvent(cwd, {
-		version: 2,
-		timestamp: new Date().toISOString(),
-		type: "context_compaction",
-		sessionId: state.sessionId,
-		payload: {
-			messages: state.messages,
-			compaction: state.compaction,
-		},
+	const path = getSessionPath(cwd, state.sessionId);
+	await serializeWrite(path, async () => {
+		await ensureSessionStartedUnlocked(cwd, state);
+		await appendSessionEventUnlocked(cwd, {
+			version: 2,
+			timestamp: new Date().toISOString(),
+			type: "context_compaction",
+			sessionId: state.sessionId,
+			payload: {
+				messages: state.messages,
+				compaction: state.compaction,
+			},
+		});
+		await appendSessionIndex(cwd, state);
 	});
-	await appendSessionIndex(cwd, state);
 }
 
 export async function appendSessionMemoryExtraction(
@@ -272,19 +295,22 @@ export async function appendSessionMemoryExtraction(
 	state: AgentState,
 	result: SessionMemoryExtractionResult,
 ): Promise<void> {
-	await ensureSessionStarted(cwd, state);
-	await appendSessionEvent(cwd, {
-		version: 2,
-		timestamp: new Date().toISOString(),
-		type: "memory_extraction",
-		sessionId: state.sessionId,
-		payload: {
-			subAgentSessionId: result.subAgentSessionId,
-			ok: result.ok,
-			summary: result.summary,
-			reason: result.reason,
-			reasons: result.reasons,
-		},
+	const path = getSessionPath(cwd, state.sessionId);
+	await serializeWrite(path, async () => {
+		await ensureSessionStartedUnlocked(cwd, state);
+		await appendSessionEventUnlocked(cwd, {
+			version: 2,
+			timestamp: new Date().toISOString(),
+			type: "memory_extraction",
+			sessionId: state.sessionId,
+			payload: {
+				subAgentSessionId: result.subAgentSessionId,
+				ok: result.ok,
+				summary: result.summary,
+				reason: result.reason,
+				reasons: result.reasons,
+			},
+		});
 	});
 }
 
@@ -342,51 +368,52 @@ export async function saveSession(
 	state: AgentState,
 ): Promise<string> {
 	const path = getSessionPath(cwd, state.sessionId);
-	const toolExecutions = state.toolExecutions.length
-		? state.toolExecutions
-		: deriveToolExecutions(state.messages);
-	const events: SessionEvent[] = [
-		{
-			version: 2,
-			timestamp: new Date().toISOString(),
-			type: "session_meta",
-			sessionId: state.sessionId,
-			payload: {
-				cwd: state.cwd,
-				task: state.task,
+	return serializeWrite(path, async () => {
+		const toolExecutions = state.toolExecutions.length
+			? state.toolExecutions
+			: deriveToolExecutions(state.messages);
+		const events: SessionEvent[] = [
+			{
+				version: 2,
+				timestamp: new Date().toISOString(),
+				type: "session_meta",
+				sessionId: state.sessionId,
+				payload: {
+					cwd: state.cwd,
+					task: state.task,
+				},
 			},
-		},
-		...state.messages.flatMap((message) =>
-			createMessageEvents(state.sessionId, message),
-		),
-		{
-			version: 2,
-			timestamp: new Date().toISOString(),
-			type: "state_snapshot",
-			sessionId: state.sessionId,
-			payload: {
-				task: state.task,
-				toolPermissionContext: persistableToolPermissionContext(
-					state.toolPermissionContext,
-				),
-				plan: state.plan,
-				turn: state.turn,
-				budget: state.budget,
-				compaction: state.compaction,
-				toolExecutions,
-				changedFiles: state.changedFiles,
+			...state.messages.flatMap((message) =>
+				createMessageEvents(state.sessionId, message),
+			),
+			{
+				version: 2,
+				timestamp: new Date().toISOString(),
+				type: "state_snapshot",
+				sessionId: state.sessionId,
+				payload: {
+					task: state.task,
+					toolPermissionContext: persistableToolPermissionContext(
+						state.toolPermissionContext,
+					),
+					plan: state.plan,
+					turn: state.turn,
+					budget: state.budget,
+					compaction: state.compaction,
+					toolExecutions,
+					changedFiles: state.changedFiles,
+				},
 			},
-		},
-	];
+		];
 
-	await mkdir(dirname(path), { recursive: true });
-	await writeFile(
-		path,
-		`${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
-		"utf8",
-	);
-	await appendSessionIndex(cwd, state);
-	return path;
+		await mkdir(dirname(path), { recursive: true });
+		await atomicReplaceFile(
+			path,
+			`${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
+		);
+		await appendSessionIndex(cwd, state);
+		return path;
+	});
 }
 
 export async function loadSession(
@@ -409,12 +436,13 @@ export async function loadSession(
 	return loadLegacySession(cwd, sessionId);
 }
 
-async function appendSessionEvent(
+async function appendSessionEventUnlocked(
 	cwd: string,
 	event: SessionEvent,
 ): Promise<void> {
 	const path = getSessionPath(cwd, event.sessionId);
 	await mkdir(dirname(path), { recursive: true });
+	await truncateIncompleteTail(path);
 	await appendFile(path, `${JSON.stringify(event)}\n`, "utf8");
 }
 
@@ -423,18 +451,101 @@ async function appendSessionIndex(
 	state: AgentState,
 ): Promise<void> {
 	const indexPath = getSessionIndexPath(cwd);
-	const sessionPath = getSessionPath(cwd, state.sessionId);
-	const entry: SessionIndexEntry = {
-		version: 1,
-		sessionId: state.sessionId,
-		cwd: state.cwd,
-		task: state.task,
-		path: relative(resolve(cwd), sessionPath),
-		updatedAt: new Date().toISOString(),
-	};
+	await serializeWrite(indexPath, async () => {
+		const sessionPath = getSessionPath(cwd, state.sessionId);
+		const entry: SessionIndexEntry = {
+			version: 1,
+			sessionId: state.sessionId,
+			cwd: state.cwd,
+			task: state.task,
+			path: relative(resolve(cwd), sessionPath),
+			updatedAt: new Date().toISOString(),
+		};
 
-	await mkdir(dirname(indexPath), { recursive: true });
-	await appendFile(indexPath, `${JSON.stringify(entry)}\n`, "utf8");
+		await mkdir(dirname(indexPath), { recursive: true });
+		await truncateIncompleteTail(indexPath);
+		await appendFile(indexPath, `${JSON.stringify(entry)}\n`, "utf8");
+	});
+}
+
+async function serializeWrite<T>(
+	path: string,
+	operation: () => Promise<T>,
+): Promise<T> {
+	const previous = writeTails.get(path) ?? Promise.resolve();
+	let release!: () => void;
+	const gate = new Promise<void>((resolveGate) => {
+		release = resolveGate;
+	});
+	const tail = previous.catch(() => undefined).then(() => gate);
+	writeTails.set(path, tail);
+
+	await previous.catch(() => undefined);
+	try {
+		return await operation();
+	} finally {
+		release();
+		if (writeTails.get(path) === tail) {
+			writeTails.delete(path);
+		}
+	}
+}
+
+async function atomicReplaceFile(path: string, content: string): Promise<void> {
+	const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+	let handle: Awaited<ReturnType<typeof open>> | undefined;
+	try {
+		handle = await open(temporaryPath, "wx", 0o600);
+		await handle.writeFile(content, "utf8");
+		await handle.sync();
+		await handle.close();
+		handle = undefined;
+		await rename(temporaryPath, path);
+	} catch (caught) {
+		await handle?.close().catch(() => undefined);
+		await rm(temporaryPath, { force: true }).catch(() => undefined);
+		throw caught;
+	}
+}
+
+async function truncateIncompleteTail(path: string): Promise<void> {
+	let handle: Awaited<ReturnType<typeof open>>;
+	try {
+		handle = await open(path, "r+");
+	} catch (caught) {
+		if (isNotFoundError(caught)) {
+			return;
+		}
+		throw caught;
+	}
+
+	try {
+		const { size } = await handle.stat();
+		let cursor = size;
+		while (cursor > 0) {
+			const length = Math.min(cursor, 4_096);
+			const position = cursor - length;
+			const buffer = Buffer.alloc(length);
+			const { bytesRead } = await handle.read(buffer, 0, length, position);
+			for (let index = bytesRead - 1; index >= 0; index--) {
+				if (buffer[index] !== 0x0a) {
+					continue;
+				}
+				const completeLength = position + index + 1;
+				if (completeLength < size) {
+					await handle.truncate(completeLength);
+					await handle.sync();
+				}
+				return;
+			}
+			cursor = position;
+		}
+
+		await handle.truncate(0);
+		await handle.sync();
+	} finally {
+		await handle.close();
+	}
 }
 
 function replaySessionEvents(
@@ -453,12 +564,30 @@ function replaySessionEvents(
 		budget: { turnsUsed: 0, maxTurns: 20 },
 	};
 
-	for (const line of raw.split(/\r?\n/)) {
+	const lines = raw.split(/\r?\n/);
+	const hasTerminatingNewline = /\r?\n$/.test(raw);
+	let parsedEventCount = 0;
+	for (const [index, line] of lines.entries()) {
 		if (!line.trim()) {
 			continue;
 		}
 
-		const event = JSON.parse(line) as SessionEvent | LegacySessionEvent;
+		let event: SessionEvent | LegacySessionEvent;
+		try {
+			event = JSON.parse(line) as SessionEvent | LegacySessionEvent;
+		} catch (caught) {
+			const isIncompleteTail =
+				index === lines.length - 1 &&
+				!hasTerminatingNewline &&
+				parsedEventCount > 0;
+			if (isIncompleteTail) {
+				break;
+			}
+			throw new Error(
+				`invalid session event at line ${index + 1}: ${formatCaught(caught)}`,
+			);
+		}
+		parsedEventCount++;
 		if (event.sessionId !== sessionId) {
 			throw new Error(`session id mismatch in event: ${sessionId}`);
 		}

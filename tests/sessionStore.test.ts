@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import {
+	appendFile,
 	mkdir,
 	mkdtemp,
 	readdir,
@@ -76,6 +77,271 @@ test("saveSession writes JSONL events and loadSession hydrates runtime fields", 
 		expect(restored.finalAnswer).toBeUndefined();
 		expect(restored.observations).toEqual([]);
 		expect(restored.changedFiles).toEqual(["src/auth.ts"]);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("loadSession ignores an incomplete final JSONL record", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "cagent-session-"));
+	try {
+		const state = createInitialState(
+			"recover tail",
+			cwd,
+			[],
+			"tail-recovery-1",
+		);
+		const path = await saveSession(cwd, state);
+		await appendFile(path, '{"partial":"tail"', "utf8");
+
+		const restored = await loadSession(cwd, state.sessionId);
+		expect(restored.sessionId).toBe(state.sessionId);
+		expect(restored.messages).toEqual(state.messages);
+
+		await appendSessionMessage(cwd, state, {
+			role: "assistant",
+			content: "continued after recovery",
+		});
+		const healedRaw = await readFile(path, "utf8");
+		expect(healedRaw).not.toContain('{"partial":"tail"');
+		expect(
+			(await loadSession(cwd, state.sessionId)).messages.at(-1)?.content,
+		).toBe("continued after recovery");
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("loadSession rejects malformed JSONL before the final record", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "cagent-session-"));
+	try {
+		const state = createInitialState("reject corruption", cwd, [], "corrupt-1");
+		const path = await saveSession(cwd, state);
+		const lines = (await readFile(path, "utf8")).trimEnd().split("\n");
+		lines.splice(1, 0, '{"version":2');
+		await writeFile(path, `${lines.join("\n")}\n`, "utf8");
+
+		await expect(loadSession(cwd, state.sessionId)).rejects.toThrow(
+			"invalid session event at line 2",
+		);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("concurrent message appends keep each event batch contiguous", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "cagent-session-"));
+	try {
+		const state = createInitialState(
+			"append concurrently",
+			cwd,
+			[],
+			"concurrent-1",
+		);
+		const messages = Array.from({ length: 20 }, (_, index) => ({
+			role: "assistant" as const,
+			content: `message-${index}`,
+			toolCalls: [
+				{
+					id: `call-${index}`,
+					name: "Read",
+					arguments: JSON.stringify({ file_path: `file-${index}.txt` }),
+				},
+			],
+		}));
+
+		await Promise.all(
+			messages.map((message) => appendSessionMessage(cwd, state, message)),
+		);
+
+		const events = (
+			await readFile(getSessionPath(cwd, state.sessionId), "utf8")
+		)
+			.trim()
+			.split("\n")
+			.map(
+				(line) =>
+					JSON.parse(line) as {
+						type: string;
+						payload?: {
+							id?: string;
+							message?: { toolCalls?: Array<{ id: string }> };
+						};
+					},
+			);
+		expect(events[0]?.type).toBe("session_meta");
+		expect(events).toHaveLength(1 + messages.length * 2);
+		for (let index = 1; index < events.length; index += 2) {
+			const messageEvent = events[index];
+			const toolCallEvent = events[index + 1];
+			expect(messageEvent?.type).toBe("assistant_message");
+			expect(toolCallEvent?.type).toBe("tool_call");
+			expect(toolCallEvent?.payload?.id).toBe(
+				messageEvent?.payload?.message?.toolCalls?.[0]?.id,
+			);
+		}
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("concurrent saves serialize complete session files and index entries", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "cagent-session-"));
+	try {
+		const states = Array.from({ length: 16 }, (_, index) =>
+			createInitialState(
+				`concurrent save ${index}`,
+				cwd,
+				[],
+				`concurrent-save-${index}`,
+			),
+		);
+
+		await Promise.all(states.map((state) => saveSession(cwd, state)));
+
+		const indexEntries = (await readFile(getSessionIndexPath(cwd), "utf8"))
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line) as { sessionId: string });
+		expect(indexEntries).toHaveLength(states.length);
+		expect(new Set(indexEntries.map((entry) => entry.sessionId))).toEqual(
+			new Set(states.map((state) => state.sessionId)),
+		);
+
+		for (const state of states) {
+			const raw = await readFile(getSessionPath(cwd, state.sessionId), "utf8");
+			expect(raw.endsWith("\n")).toBe(true);
+			for (const line of raw.trim().split("\n")) {
+				expect(() => JSON.parse(line)).not.toThrow();
+			}
+		}
+
+		const files = await readdir(join(cwd, ".cagent", "sessions"));
+		expect(files.some((file) => file.endsWith(".tmp"))).toBe(false);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("concurrent saves to one session leave one complete snapshot", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "cagent-session-"));
+	try {
+		const states = Array.from({ length: 12 }, (_, index) => ({
+			...createInitialState(
+				`same session ${index}`,
+				cwd,
+				[],
+				"same-session-save",
+			),
+			turn: index,
+		}));
+
+		await Promise.all(states.map((state) => saveSession(cwd, state)));
+
+		const events = (
+			await readFile(getSessionPath(cwd, "same-session-save"), "utf8")
+		)
+			.trim()
+			.split("\n")
+			.map(
+				(line) =>
+					JSON.parse(line) as {
+						type: string;
+						payload?: { task?: string; turn?: number };
+					},
+			);
+		expect(events[0]?.type).toBe("session_meta");
+		expect(events.at(-1)?.type).toBe("state_snapshot");
+		expect(events[0]?.payload?.task).toBe(events.at(-1)?.payload?.task);
+		const savedTask = events[0]?.payload?.task;
+		const savedTurn = events.at(-1)?.payload?.turn;
+		if (savedTask === undefined || savedTurn === undefined) {
+			throw new Error("expected a complete session snapshot");
+		}
+		const restored = await loadSession(cwd, "same-session-save");
+		expect(restored.task).toBe(savedTask);
+		expect(restored.turn).toBe(savedTurn);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("a later index append removes an incomplete index tail", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "cagent-session-"));
+	try {
+		const first = createInitialState("first", cwd, [], "index-tail-1");
+		const second = createInitialState("second", cwd, [], "index-tail-2");
+		await saveSession(cwd, first);
+		const indexPath = getSessionIndexPath(cwd);
+		await appendFile(indexPath, '{"partial":"index"', "utf8");
+
+		await saveSession(cwd, second);
+
+		const raw = await readFile(indexPath, "utf8");
+		expect(raw).not.toContain('{"partial":"index"');
+		expect(
+			raw
+				.trim()
+				.split("\n")
+				.map((line) => (JSON.parse(line) as { sessionId: string }).sessionId),
+		).toEqual([first.sessionId, second.sessionId]);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("a failed atomic replace cleans up its temporary file", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "cagent-session-"));
+	try {
+		const state = createInitialState(
+			"replace failure",
+			cwd,
+			[],
+			"replace-failure-1",
+		);
+		await mkdir(getSessionPath(cwd, state.sessionId), { recursive: true });
+
+		await expect(saveSession(cwd, state)).rejects.toThrow();
+
+		const files = await readdir(join(cwd, ".cagent", "sessions"));
+		expect(files.some((file) => file.endsWith(".tmp"))).toBe(false);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("a failed snapshot serialization preserves the previous session", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "cagent-session-"));
+	try {
+		const state = createInitialState(
+			"stable snapshot",
+			cwd,
+			[],
+			"atomic-failure-1",
+		);
+		const path = await saveSession(cwd, state);
+		const previous = await readFile(path, "utf8");
+		const circularMessage = {
+			role: "assistant" as const,
+			content: "cannot serialize",
+			cycle: undefined as unknown,
+		};
+		circularMessage.cycle = circularMessage;
+
+		await expect(
+			saveSession(cwd, {
+				...state,
+				messages: [...state.messages, circularMessage],
+			}),
+		).rejects.toThrow();
+		expect(await readFile(path, "utf8")).toBe(previous);
+
+		await appendSessionMessage(cwd, state, {
+			role: "assistant",
+			content: "queue recovered",
+		});
+		const restored = await loadSession(cwd, state.sessionId);
+		expect(restored.messages.at(-1)?.content).toBe("queue recovered");
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}
