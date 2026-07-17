@@ -18,8 +18,6 @@ import {
 } from "../src/tools/planToolNames";
 import { App } from "../src/ui/App";
 
-const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
 async function makeTempDir(): Promise<string> {
 	return mkdtemp(join(tmpdir(), "cagent-app-"));
 }
@@ -30,15 +28,16 @@ test("interactive dialog box drives a multi-turn conversation", async () => {
 	const { lastFrame, stdin, unmount } = render(<App cwd={cwd} model={model} />);
 
 	try {
-		await wait(100);
-		expect(lastFrame()).toContain("Type a message and press Enter...");
+		await waitForFrame(lastFrame, "Type a message and press Enter...");
 
 		stdin.write("hello there");
-		await wait(100);
-		expect(lastFrame()).toContain("hello there");
+		await waitForFrame(lastFrame, "> hello there");
 
 		stdin.write("\r");
-		await wait(300);
+		await waitForFrame(lastFrame, [
+			"Stub agent received task: hello there",
+			"Type a message and press Enter...",
+		]);
 
 		let frame = lastFrame() ?? "";
 		expect(frame).toContain("user");
@@ -47,11 +46,13 @@ test("interactive dialog box drives a multi-turn conversation", async () => {
 		expect(frame).toContain("Type a message and press Enter...");
 
 		stdin.write("second message");
-		await wait(100);
-		expect(lastFrame()).toContain("second message");
+		await waitForFrame(lastFrame, "> second message");
 
 		stdin.write("\r");
-		await wait(300);
+		await waitForFrame(lastFrame, [
+			"Stub agent received task: second message",
+			"Type a message and press Enter...",
+		]);
 
 		frame = lastFrame() ?? "";
 		expect(frame).toContain("hello there");
@@ -86,9 +87,9 @@ test("resume slash command restores a saved session", async () => {
 
 	try {
 		stdin.write("/resume resume-1");
-		await wait(100);
+		await waitForFrame(lastFrame, "> /resume resume-1");
 		stdin.write("\r");
-		await wait(300);
+		await waitForFrame(lastFrame, "session: resume-1");
 
 		const frame = lastFrame() ?? "";
 		expect(frame).toContain("session: resume-1");
@@ -116,11 +117,11 @@ test("/plan enters plan mode locally without calling the model", async () => {
 	const { lastFrame, stdin, unmount } = render(<App cwd={cwd} model={model} />);
 
 	try {
-		await wait(100);
+		await waitForFrame(lastFrame, "Type a message and press Enter...");
 		stdin.write("/plan");
-		await wait(100);
+		await waitForFrame(lastFrame, "> /plan");
 		stdin.write("\r");
-		await wait(300);
+		await waitForFrame(lastFrame, "Entered plan mode");
 
 		const frame = lastFrame() ?? "";
 		expect(frame).toContain("user");
@@ -140,11 +141,11 @@ test("/memory initializes the memory store locally without calling the model", a
 	const { lastFrame, stdin, unmount } = render(<App cwd={cwd} model={model} />);
 
 	try {
-		await wait(100);
+		await waitForFrame(lastFrame, "Type a message and press Enter...");
 		stdin.write("/memory");
-		await wait(100);
+		await waitForFrame(lastFrame, "> /memory");
 		stdin.write("\r");
-		await wait(300);
+		await waitForFrame(lastFrame, "Memory store is ready");
 
 		const frame = lastFrame() ?? "";
 		expect(frame).toContain("user");
@@ -207,11 +208,11 @@ test("plan approval prompt continues after approve", async () => {
 	const { lastFrame, stdin, unmount } = render(<App cwd={cwd} model={model} />);
 
 	try {
-		await wait(100);
+		await waitForFrame(lastFrame, "Type a message and press Enter...");
 		stdin.write("plan this change");
-		await wait(100);
+		await waitForFrame(lastFrame, "> plan this change");
 		stdin.write("\r");
-		await wait(500);
+		await waitForFrame(lastFrame, "plan approval");
 
 		let frame = lastFrame() ?? "";
 		expect(frame).toContain("plan approval");
@@ -219,9 +220,13 @@ test("plan approval prompt continues after approve", async () => {
 		expect(frame).toContain("approve or reject");
 
 		stdin.write("approve");
-		await wait(100);
+		await waitForFrame(lastFrame, "> approve");
 		stdin.write("\r");
-		await wait(500);
+		await waitForFrame(lastFrame, [
+			"approve plan",
+			"implementation started",
+			"Type a message and press Enter...",
+		]);
 
 		frame = lastFrame() ?? "";
 		expect(frame).toContain("approve plan");
@@ -263,9 +268,9 @@ test("tool approval prompt resumes the original call after allow", async () => {
 	const { lastFrame, stdin, unmount } = render(<App cwd={cwd} model={model} />);
 
 	try {
-		await wait(100);
+		await waitForFrame(lastFrame, "Type a message and press Enter...");
 		stdin.write("write a file");
-		await wait(50);
+		await waitForFrame(lastFrame, "> write a file");
 		stdin.write("\r");
 		await waitForFrame(lastFrame, "tool approval");
 
@@ -275,9 +280,12 @@ test("tool approval prompt resumes the original call after allow", async () => {
 		expect(frame).toContain("allow, always, or deny");
 
 		stdin.write("allow");
-		await wait(50);
+		await waitForFrame(lastFrame, "> allow");
 		stdin.write("\r");
-		await waitForFrame(lastFrame, "write completed");
+		await waitForFrame(lastFrame, [
+			"write completed",
+			"Type a message and press Enter...",
+		]);
 
 		frame = lastFrame() ?? "";
 		expect(frame).not.toContain("tool approval");
@@ -349,16 +357,15 @@ test("background completion wakes an idle main agent exactly once", async () => 
 	const { lastFrame, stdin, unmount } = render(<App cwd={cwd} model={model} />);
 
 	try {
-		await wait(100);
+		await waitForFrame(lastFrame, "Type a message and press Enter...");
 		stdin.write("delegate this");
-		await wait(50);
+		await waitForFrame(lastFrame, "> delegate this");
 		stdin.write("\r");
-		await Promise.race([
+		await waitForSignal(
 			model.childEntered.promise,
-			wait(2_000).then(() => {
-				throw new Error(`child did not start; frame=${lastFrame() ?? ""}`);
-			}),
-		]);
+			lastFrame,
+			"child did not start",
+		);
 		await waitForFrame(lastFrame, "main is idle while child runs");
 
 		model.releaseChild.resolve();
@@ -387,14 +394,42 @@ function deferredSignal(): { promise: Promise<void>; resolve(): void } {
 
 async function waitForFrame(
 	lastFrame: () => string | undefined,
-	text: string,
+	expected: string | readonly string[],
 ): Promise<void> {
+	const expectedTexts = typeof expected === "string" ? [expected] : expected;
 	const deadline = Date.now() + 2_000;
 	while (Date.now() < deadline) {
-		if (lastFrame()?.includes(text)) {
+		const frame = lastFrame() ?? "";
+		if (expectedTexts.every((text) => frame.includes(text))) {
 			return;
 		}
-		await wait(20);
+		await new Promise<void>((resolve) => setImmediate(resolve));
 	}
-	throw new Error(`timed out waiting for frame text: ${text}`);
+	throw new Error(
+		`timed out waiting for frame text: ${expectedTexts.join(", ")}; frame=${lastFrame() ?? "<empty>"}`,
+	);
+}
+
+async function waitForSignal(
+	promise: Promise<void>,
+	lastFrame: () => string | undefined,
+	description: string,
+): Promise<void> {
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	try {
+		await Promise.race([
+			promise,
+			new Promise<never>((_resolve, reject) => {
+				timeout = setTimeout(() => {
+					reject(
+						new Error(`${description}; frame=${lastFrame() ?? "<empty>"}`),
+					);
+				}, 2_000);
+			}),
+		]);
+	} finally {
+		if (timeout) {
+			clearTimeout(timeout);
+		}
+	}
 }

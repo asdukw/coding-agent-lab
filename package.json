@@ -2,6 +2,7 @@
 	"name": "coding-agent-learn",
 	"type": "module",
 	"private": true,
+	"packageManager": "bun@1.3.14",
 	"bin": {
 		"cagent": "./bin/cagent"
 	},
@@ -10,8 +11,10 @@
 		"dev": "bun --no-env-file --watch src/main.tsx",
 		"build:sandbox": "\"$SYSTEMROOT/System32/WindowsPowerShell/v1.0/powershell.exe\" -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows-sandbox.ps1",
 		"check": "tsc --noEmit",
-		"test": "bun test tests/agentMailbox.test.ts tests/agentManager.test.ts tests/app.test.tsx tests/compact.test.ts tests/localCommands.test.ts tests/mcp.test.ts tests/memory.test.ts tests/memoryExtract.test.ts tests/deepseekConnectivity.test.ts tests/query.agentMessages.test.ts tests/query.tool.test.ts tests/sessionStore.test.ts tests/tools.test.ts tests/permissionApproval.test.ts tests/projectContext.test.ts",
+		"test": "bun run test:unit",
+		"test:unit": "bun test --path-ignore-patterns=tests/deepseekConnectivity.test.ts",
 		"test:deepseek": "bun test tests/deepseekConnectivity.test.ts",
+		"ci": "bun run check:style && bun run check && bun run test:unit",
 		"lint": "biome check src tests package.json tsconfig.json",
 		"format": "biome format --write src tests package.json tsconfig.json",
 		"check:style": "biome check src tests package.json tsconfig.json",
@@ -19,12 +22,10 @@
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.5.0",
-		"@types/bun": "latest",
+		"@types/bun": "1.3.14",
 		"@types/react": "^19.2.17",
-		"ink-testing-library": "^4.0.0"
-	},
-	"peerDependencies": {
-		"typescript": "^5"
+		"ink-testing-library": "^4.0.0",
+		"typescript": "5.9.3"
 	},
 	"dependencies": {
 		"@modelcontextprotocol/sdk": "^1.29.0",
