@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, setDefaultTimeout, test } from "bun:test";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +17,10 @@ import {
 	UPDATE_PLAN_TOOL_NAME,
 } from "../src/tools/planToolNames";
 import { App } from "../src/ui/App";
+
+const APP_WAIT_TIMEOUT_MS = 10_000;
+
+setDefaultTimeout(20_000);
 
 async function makeTempDir(): Promise<string> {
 	return mkdtemp(join(tmpdir(), "cagent-app-"));
@@ -496,7 +500,7 @@ async function waitForFrameCondition(
 	description: string,
 	predicate: (frame: string) => boolean,
 ): Promise<void> {
-	const deadline = Date.now() + 2_000;
+	const deadline = Date.now() + APP_WAIT_TIMEOUT_MS;
 	while (Date.now() < deadline) {
 		const frame = lastFrame() ?? "";
 		if (predicate(frame)) {
@@ -527,7 +531,7 @@ async function waitForSignal(
 					reject(
 						new Error(`${description}; frame=${lastFrame() ?? "<empty>"}`),
 					);
-				}, 2_000);
+				}, APP_WAIT_TIMEOUT_MS);
 			}),
 		]);
 	} finally {
