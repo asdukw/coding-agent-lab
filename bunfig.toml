@@ -1,0 +1,2 @@
+# The agent control plane must not consume workspace-created dotenv files.
+env = false

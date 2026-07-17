@@ -15,8 +15,11 @@ import {
 	updatePlanTool,
 } from "./planTools";
 import { readTool } from "./readTool";
+import { shellTool } from "./shellTool";
 import type { Tools } from "./types";
 import { writeTool } from "./writeTool";
+
+const WINDOWS_TOOLS: Tools = process.platform === "win32" ? [shellTool] : [];
 
 export const BUILTIN_TOOLS: Tools = [
 	readTool,
@@ -24,6 +27,7 @@ export const BUILTIN_TOOLS: Tools = [
 	editTool,
 	globTool,
 	grepTool,
+	...WINDOWS_TOOLS,
 	enterPlanModeTool,
 	updatePlanTool,
 	exitPlanModeTool,
@@ -40,6 +44,7 @@ export {
 	listAgentsTool,
 	readTool,
 	sendAgentMessageTool,
+	shellTool,
 	spawnSubagentTool,
 	updatePlanTool,
 	waitAgentTool,

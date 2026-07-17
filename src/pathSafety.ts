@@ -1,5 +1,12 @@
 import { lstat, realpath } from "node:fs/promises";
-import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
+import {
+	basename,
+	dirname,
+	isAbsolute,
+	relative,
+	resolve,
+	sep,
+} from "node:path";
 
 class PathSafetyError extends Error {}
 
@@ -38,7 +45,10 @@ export function isPathInside(targetPath: string, parentPath: string): boolean {
 	const child = resolve(targetPath);
 	const parent = resolve(parentPath);
 	const rel = relative(parent, child);
-	return rel === "" || (!!rel && !rel.startsWith("..") && !isAbsolute(rel));
+	return (
+		rel === "" ||
+		(!!rel && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
+	);
 }
 
 export async function resolveRealPathForWrite(path: string): Promise<string> {

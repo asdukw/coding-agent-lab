@@ -1,5 +1,5 @@
 import { stat } from "node:fs/promises";
-import { isAbsolute, relative, resolve } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { resolveRealPathForWrite } from "../pathSafety";
 
 export type ResourceMode = "read" | "write";
@@ -179,13 +179,25 @@ export async function memoryResourceAccess(
 	};
 }
 
-export function opaqueToolAccess(): ResourceAccess {
+export function opaqueToolAccess(mode: ResourceMode = "write"): ResourceAccess {
 	return {
 		namespace: "runtime",
 		key: "opaque-tools",
-		mode: "write",
+		mode,
 		scope: "exact",
 	};
+}
+
+export function resourceAccessSetsEqual(
+	left: readonly ResourceAccess[],
+	right: readonly ResourceAccess[],
+): boolean {
+	const leftKeys = normalizedAccessKeys(left);
+	const rightKeys = normalizedAccessKeys(right);
+	return (
+		leftKeys.length === rightKeys.length &&
+		leftKeys.every((key, index) => key === rightKeys[index])
+	);
 }
 
 export function resolveToolPath(cwd: string, path: string): string {
@@ -210,6 +222,19 @@ function normalizeAccesses(
 		});
 	}
 	return [...normalized.values()];
+}
+
+function normalizedAccessKeys(accesses: readonly ResourceAccess[]): string[] {
+	return normalizeAccesses(accesses)
+		.map((access) =>
+			JSON.stringify([
+				access.namespace,
+				access.key,
+				access.mode,
+				access.scope ?? "exact",
+			]),
+		)
+		.sort();
 }
 
 function accessSetsConflict(
@@ -246,7 +271,10 @@ function resourcesOverlap(
 
 function isPathWithin(path: string, parent: string): boolean {
 	const rel = relative(parent, path);
-	return rel === "" || (!!rel && !rel.startsWith("..") && !isAbsolute(rel));
+	return (
+		rel === "" ||
+		(!!rel && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
+	);
 }
 
 function normalizePath(path: string): string {

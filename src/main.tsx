@@ -1,6 +1,7 @@
 import { render } from "ink";
 import { discoverMcpTools } from "./mcp/client";
 import { createModelClientFromEnv } from "./model";
+import { initializeWindowsSandbox } from "./sandbox";
 import { loadSession } from "./sessionStore";
 import { App } from "./ui/App";
 
@@ -39,6 +40,9 @@ export function parseCliArgs(args: string[]): CliArgs {
 
 async function main(): Promise<void> {
 	const cwd = process.cwd();
+	if (process.platform === "win32") {
+		await initializeWindowsSandbox(cwd);
+	}
 	const { task, resumeId } = parseCliArgs(process.argv.slice(2));
 	const initialState = resumeId ? await loadSession(cwd, resumeId) : undefined;
 	const model = createModelClientFromEnv();

@@ -17,6 +17,7 @@ import {
 	EXIT_PLAN_MODE_TOOL_NAME,
 	UPDATE_PLAN_TOOL_NAME,
 } from "./planToolNames";
+import { SHELL_TOOL_NAME } from "./shellTool";
 import type { Tool, Tools } from "./types";
 
 const READ_ONLY_TOOL_NAMES = new Set(["Read", "Glob", "Grep"]);
@@ -40,7 +41,12 @@ const PLAN_MODE_TOOL_NAMES = new Set([
 
 export function getToolsForMode(state: AgentState, tools: Tools): Tools {
 	if (state.toolPermissionContext.mode !== "plan") {
-		return tools.filter((tool) => !PLAN_ONLY_TOOL_NAMES.has(tool.name));
+		return tools.filter(
+			(tool) =>
+				!PLAN_ONLY_TOOL_NAMES.has(tool.name) &&
+				(tool.name !== SHELL_TOOL_NAME || isPrivilegedMainToolAllowed(state)) &&
+				(!isMcpTool(tool) || isPrivilegedMainToolAllowed(state)),
+		);
 	}
 
 	return tools.filter((tool) => {
@@ -63,6 +69,14 @@ export async function authorizeToolCall(
 		if (GENERIC_WRITE_TOOL_NAMES.has(tool.name)) {
 			await authorizeWriteToolCall(state, tool, args);
 		}
+		if (
+			(tool.name === SHELL_TOOL_NAME || isMcpTool(tool)) &&
+			!isPrivilegedMainToolAllowed(state)
+		) {
+			throw new Error(
+				`${tool.name} is only available to the unrestricted main agent`,
+			);
+		}
 		return;
 	}
 
@@ -84,6 +98,17 @@ export async function authorizeToolCall(
 	}
 
 	throw new Error(`${tool.name} is not allowed in plan mode`);
+}
+
+function isPrivilegedMainToolAllowed(state: AgentState): boolean {
+	return (
+		state.toolPermissionContext.agentType === "main" &&
+		state.toolPermissionContext.writePolicy === undefined
+	);
+}
+
+function isMcpTool(tool: Tool): boolean {
+	return tool.name.startsWith("mcp__");
 }
 
 async function authorizeWriteToolCall(

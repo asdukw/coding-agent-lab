@@ -5,6 +5,7 @@ import {
 	opaqueToolAccess,
 	type ResourceAccess,
 	type RuntimeResourceLock,
+	resourceAccessSetsEqual,
 	runtimeResourceLock,
 	sessionResourceAccess,
 } from "./resourceLock";
@@ -129,17 +130,11 @@ async function prepareToolCall(
 		>;
 		await authorizeToolCall(context.getState(), tool, args);
 		const callContext = toolContext(context);
-		const declaredAccesses = tool.getResourceAccesses
-			? await tool.getResourceAccesses(args, callContext)
-			: [opaqueToolAccess()];
 		return {
 			call,
 			tool,
 			args,
-			accesses: withSessionReadAccess(
-				declaredAccesses,
-				context.getState().sessionId,
-			),
+			accesses: await planToolAccesses(tool, args, callContext),
 			callContext,
 		};
 	} catch (caught) {
@@ -153,24 +148,65 @@ async function executePreparedToolCall(
 	signal?: AbortSignal,
 ): Promise<ToolCallResult> {
 	try {
-		const release = await lockManager.acquire(prepared.accesses, signal);
-		try {
-			throwIfAborted(signal);
-			const result = await prepared.tool.call(
-				prepared.args,
-				prepared.callContext,
-			);
-			return successfulToolCallResult(
-				prepared.call,
-				prepared.args,
-				JSON.stringify(result),
-			);
-		} finally {
-			release();
+		let accesses = prepared.accesses;
+		for (;;) {
+			const release = await lockManager.acquire(accesses, signal);
+			try {
+				throwIfAborted(signal);
+				// Preparation can happen concurrently for a whole model response. Recheck
+				// permissions only after the session/resource lease is held so an earlier
+				// state-changing tool (for example EnterPlanMode) cannot leave this call
+				// executing under a stale authorization decision.
+				await authorizeToolCall(
+					prepared.callContext.getState(),
+					prepared.tool,
+					prepared.args,
+				);
+
+				// An opaque Shell/MCP call can change a symlink or directory between the
+				// initial realpath lookup and lease acquisition. Re-plan while holding the
+				// opaque barrier; if identity changed, release and atomically reacquire the
+				// new complete resource set before executing.
+				const currentAccesses = await planToolAccesses(
+					prepared.tool,
+					prepared.args,
+					prepared.callContext,
+				);
+				if (!resourceAccessSetsEqual(accesses, currentAccesses)) {
+					accesses = currentAccesses;
+					continue;
+				}
+
+				const result = await prepared.tool.call(
+					prepared.args,
+					prepared.callContext,
+				);
+				return successfulToolCallResult(
+					prepared.call,
+					prepared.args,
+					JSON.stringify(result),
+				);
+			} finally {
+				release();
+			}
 		}
 	} catch (caught) {
 		return failedToolCallResult(prepared.call, prepared.args, caught);
 	}
+}
+
+async function planToolAccesses(
+	tool: Tool,
+	args: Record<string, unknown>,
+	context: ToolContext,
+): Promise<ResourceAccess[]> {
+	const declaredAccesses = tool.getResourceAccesses
+		? await tool.getResourceAccesses(args, context)
+		: [opaqueToolAccess()];
+	return withSessionReadAccess(
+		withOpaqueToolBarrier(declaredAccesses),
+		context.getState().sessionId,
+	);
 }
 
 function successfulToolCallResult(
@@ -246,4 +282,23 @@ function withSessionReadAccess(
 		return accesses.slice();
 	}
 	return [...accesses, sessionResourceAccess(sessionId, "read")];
+}
+
+/**
+ * Concrete tools share the read side of the global opaque-tool barrier. A tool
+ * whose effects cannot be mapped to concrete resources takes its write side,
+ * making that call exclusive without disabling safe resource-level parallelism.
+ */
+function withOpaqueToolBarrier(
+	accesses: readonly ResourceAccess[],
+): ResourceAccess[] {
+	if (
+		accesses.some(
+			(access) =>
+				access.namespace === "runtime" && access.key === "opaque-tools",
+		)
+	) {
+		return accesses.slice();
+	}
+	return [...accesses, opaqueToolAccess("read")];
 }

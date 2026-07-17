@@ -16,6 +16,7 @@ import {
 	EXIT_PLAN_MODE_TOOL_NAME,
 	UPDATE_PLAN_TOOL_NAME,
 } from "../tools/planToolNames";
+import { SHELL_TOOL_NAME } from "../tools/shellTool";
 import type { Tools } from "../tools/types";
 import { toToolSpecs } from "../tools/types";
 import type { AgentIdentity } from "./identity";
@@ -163,7 +164,9 @@ function toolsForAgent(identity: AgentIdentity, tools: Tools): Tools {
 			tool.name !== CANCEL_AGENT_TOOL_NAME &&
 			tool.name !== ENTER_PLAN_MODE_TOOL_NAME &&
 			tool.name !== EXIT_PLAN_MODE_TOOL_NAME &&
-			tool.name !== UPDATE_PLAN_TOOL_NAME,
+			tool.name !== UPDATE_PLAN_TOOL_NAME &&
+			tool.name !== SHELL_TOOL_NAME &&
+			!tool.name.startsWith("mcp__"),
 	);
 	if (
 		identity.type === "explore" ||

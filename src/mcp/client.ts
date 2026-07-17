@@ -1,7 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { z } from "zod";
-import type { ResourceAccess } from "../tools/resourceLock";
+import { opaqueToolAccess, type ResourceAccess } from "../tools/resourceLock";
 import type { Tool, Tools } from "../tools/types";
 import { loadMcpServerConfigs, type NamedMcpStdioServerConfig } from "./config";
 
@@ -23,10 +23,13 @@ export type McpToolCallResult = {
 
 export type McpClientConnection = {
 	listTools(): Promise<{ tools: McpToolDefinition[] }>;
-	callTool(input: {
-		name: string;
-		arguments: Record<string, unknown>;
-	}): Promise<McpToolCallResult>;
+	callTool(
+		input: {
+			name: string;
+			arguments: Record<string, unknown>;
+		},
+		options?: { signal?: AbortSignal },
+	): Promise<McpToolCallResult>;
 	close(): Promise<void>;
 };
 
@@ -42,6 +45,33 @@ export type McpDiscovery = {
 
 const externalInputSchema = z.object({}).passthrough();
 const DEFAULT_MCP_DISCOVERY_TIMEOUT_MS = 10_000;
+const MCP_INHERITED_ENVIRONMENT_KEYS = [
+	"APPDATA",
+	"ComSpec",
+	"HOME",
+	"HOMEDRIVE",
+	"HOMEPATH",
+	"LANG",
+	"LC_ALL",
+	"LOCALAPPDATA",
+	"NUMBER_OF_PROCESSORS",
+	"OS",
+	"Path",
+	"PATHEXT",
+	"ProgramData",
+	"ProgramFiles",
+	"ProgramFiles(x86)",
+	"ProgramW6432",
+	"SHELL",
+	"SystemDrive",
+	"SystemRoot",
+	"TEMP",
+	"TMP",
+	"TMPDIR",
+	"USER",
+	"USERPROFILE",
+	"WINDIR",
+] as const;
 
 export async function discoverMcpTools(
 	cwd: string,
@@ -116,8 +146,10 @@ export async function connectStdioMcpServer(
 		async listTools() {
 			return client.listTools();
 		},
-		async callTool(input) {
-			return toMcpToolCallResult(await client.callTool(input));
+		async callTool(input, options) {
+			return toMcpToolCallResult(
+				await client.callTool(input, undefined, { signal: options?.signal }),
+			);
 		},
 		async close() {
 			await client.close();
@@ -161,16 +193,22 @@ function toCagentMcpTool(
 			const access: ResourceAccess = {
 				namespace: "mcp",
 				key: serverName,
-				mode: definition.annotations?.readOnlyHint ? "read" : "write",
+				// MCP annotations are supplied by the external server itself. Until a
+				// host policy maps a tool to concrete resources, treat every call as
+				// opaque and potentially mutating.
+				mode: "write",
 				scope: "exact",
 			};
-			return [access];
+			return [access, opaqueToolAccess()];
 		},
-		async call(args) {
-			const result = await client.callTool({
-				name: definition.name,
-				arguments: args,
-			});
+		async call(args, context) {
+			const result = await client.callTool(
+				{
+					name: definition.name,
+					arguments: args,
+				},
+				{ signal: context?.signal },
+			);
 			if (result.isError) {
 				throw new Error(formatMcpError(result));
 			}
@@ -213,11 +251,25 @@ function formatMcpError(result: McpToolCallResult): string {
 }
 
 function inheritedEnvironment(): Record<string, string> {
-	return Object.fromEntries(
-		Object.entries(process.env).filter(
-			(entry): entry is [string, string] => typeof entry[1] === "string",
-		),
-	);
+	const environment: Record<string, string> = {};
+	for (const name of MCP_INHERITED_ENVIRONMENT_KEYS) {
+		const value = readEnvironmentValue(name);
+		if (value !== undefined && !value.includes("\0")) {
+			environment[name] = value;
+		}
+	}
+	environment.CAGENT_MCP = "1";
+	return environment;
+}
+
+function readEnvironmentValue(name: string): string | undefined {
+	const expected = name.toLowerCase();
+	for (const [key, value] of Object.entries(process.env)) {
+		if (key.toLowerCase() === expected) {
+			return value;
+		}
+	}
+	return undefined;
 }
 
 function withTimeout<T>(operation: Promise<T>, message: string): Promise<T> {
