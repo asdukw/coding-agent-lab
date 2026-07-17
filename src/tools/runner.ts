@@ -128,7 +128,7 @@ async function prepareToolCall(
 			string,
 			unknown
 		>;
-		await authorizeToolCall(context.getState(), tool, args);
+		await authorizeToolCall(context.getState(), tool, args, call.id);
 		const callContext = toolContext(context);
 		return {
 			call,
@@ -161,6 +161,7 @@ async function executePreparedToolCall(
 					prepared.callContext.getState(),
 					prepared.tool,
 					prepared.args,
+					prepared.call.id,
 				);
 
 				// An opaque Shell/MCP call can change a symlink or directory between the

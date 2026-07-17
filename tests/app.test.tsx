@@ -232,6 +232,62 @@ test("plan approval prompt continues after approve", async () => {
 	}
 });
 
+class ToolApprovalModelClient implements ModelClient {
+	readonly name = "tool-approval";
+	private callCount = 0;
+
+	constructor(private readonly filePath: string) {}
+
+	async *stream(_request: ModelRequest): AsyncGenerator<ModelStreamEvent> {
+		this.callCount++;
+		if (this.callCount === 1) {
+			yield {
+				type: "tool_call",
+				id: "write-approved-file",
+				name: "Write",
+				arguments: JSON.stringify({
+					file_path: this.filePath,
+					content: "approved content",
+				}),
+			};
+			return;
+		}
+		yield { type: "text_delta", content: "write completed" };
+	}
+}
+
+test("tool approval prompt resumes the original call after allow", async () => {
+	const cwd = await makeTempDir();
+	const filePath = join(cwd, "approved.txt");
+	const model = new ToolApprovalModelClient(filePath);
+	const { lastFrame, stdin, unmount } = render(<App cwd={cwd} model={model} />);
+
+	try {
+		await wait(100);
+		stdin.write("write a file");
+		await wait(50);
+		stdin.write("\r");
+		await waitForFrame(lastFrame, "tool approval");
+
+		let frame = lastFrame() ?? "";
+		expect(frame).toContain("Write");
+		expect(frame).toContain("approved.txt");
+		expect(frame).toContain("allow, always, or deny");
+
+		stdin.write("allow");
+		await wait(50);
+		stdin.write("\r");
+		await waitForFrame(lastFrame, "write completed");
+
+		frame = lastFrame() ?? "";
+		expect(frame).not.toContain("tool approval");
+		expect(await readFile(filePath, "utf8")).toBe("approved content");
+	} finally {
+		unmount();
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
 class BackgroundAgentModelClient implements ModelClient {
 	readonly name = "background-agent";
 	readonly childEntered = deferredSignal();

@@ -11,20 +11,35 @@ import {
 } from "./memory";
 import type { ModelClient } from "./model/client";
 import { formatPlanMarkdown, getPlanModeReminder } from "./plan";
+import { buildBaseSystemPrompt, loadProjectContext } from "./projectContext";
 import {
 	type AgentState,
+	claimToolApprovalDecision,
+	clearToolApproval,
+	completedPendingToolCallIds,
 	ensureToolPermissionContext,
 	type Message,
+	replaceToolApprovalRequests,
 	requestPlanApproval,
+	requestToolApproval,
+	type ToolApprovalRequest,
 } from "./state";
 import {
 	formatToolExecutionMemory,
 	mergeToolExecutions,
 	recordCompletedToolExecution,
 } from "./toolExecutionMemory";
-import { getToolsForMode } from "./tools/permissions";
+import {
+	getToolPermissionDecision,
+	getToolsForMode,
+	toolArgumentFingerprint,
+} from "./tools/permissions";
 import { EXIT_PLAN_MODE_TOOL_NAME } from "./tools/planToolNames";
-import { runToolCalls } from "./tools/runner";
+import {
+	runToolCalls,
+	type ToolCallRequest,
+	type ToolCallResult,
+} from "./tools/runner";
 import { type Tools, toToolSpecs } from "./tools/types";
 
 export type QueryParams = {
@@ -38,7 +53,12 @@ export type QueryParams = {
 };
 
 export type Terminal = {
-	reason: "complete" | "max_turns" | "model_error" | "plan_approval";
+	reason:
+		| "complete"
+		| "max_turns"
+		| "model_error"
+		| "plan_approval"
+		| "tool_approval";
 	state: AgentState;
 };
 
@@ -66,6 +86,11 @@ export type QueryEvent =
 	| {
 			type: "plan_approval_request";
 			plan: string;
+			state: AgentState;
+	  }
+	| {
+			type: "tool_approval_request";
+			requests: ToolApprovalRequest[];
 			state: AgentState;
 	  }
 	| {
@@ -101,7 +126,101 @@ export async function* query({
 			},
 		],
 	};
+	const baseSystemPrompt = await loadProjectSystemPrompt(state.cwd);
 	let queryHadToolCalls = false;
+	const executeToolCalls = (calls: readonly ToolCallRequest[]) =>
+		runToolCalls({
+			calls,
+			tools: runtimeTools,
+			context: {
+				getState: () => state,
+				setState(next) {
+					state = typeof next === "function" ? next(state) : next;
+				},
+				agentRuntime,
+				signal,
+			},
+			signal,
+		});
+
+	let resumedApproval = state.toolPermissionContext.pendingToolApproval;
+	let resumedWithoutApproval = false;
+	if (resumedApproval?.needsRevalidation) {
+		const requests = await collectToolApprovalRequests(
+			state,
+			resumedApproval.calls,
+			runtimeTools,
+		);
+		state = replaceToolApprovalRequests(state, requests);
+		resumedApproval = state.toolPermissionContext.pendingToolApproval;
+		if (resumedApproval && requests.length === 0) {
+			resumedWithoutApproval = true;
+			state = clearToolApproval(state);
+		}
+	}
+	if (resumedApproval) {
+		if (!resumedWithoutApproval && !resumedApproval.decision) {
+			const terminal: Terminal = { reason: "tool_approval", state };
+			yield {
+				type: "tool_approval_request",
+				requests: resumedApproval.requests,
+				state,
+			};
+			yield { type: "terminal", terminal };
+			return terminal;
+		}
+		if (!resumedWithoutApproval && !claimToolApprovalDecision(state)) {
+			throw new Error("tool approval decision was already consumed");
+		}
+
+		queryHadToolCalls = true;
+		const completedCallIds = completedPendingToolCallIds(
+			state.messages,
+			resumedApproval.calls,
+		);
+		const resumedCalls = resumedApproval.calls.filter(
+			(call) => !completedCallIds.has(call.id),
+		);
+		const results = await executeToolCalls(resumedCalls);
+		let planApprovalRequested = false;
+		for (const result of results) {
+			state = applyToolCallResult(state, result);
+			yield { type: "message", message: result.message };
+			yield { type: "state", state };
+			if (
+				result.ok &&
+				result.call.name === EXIT_PLAN_MODE_TOOL_NAME &&
+				state.toolPermissionContext.pendingPlanApproval
+			) {
+				planApprovalRequested = true;
+			}
+		}
+		state = clearToolApproval(state);
+		yield { type: "state", state };
+
+		if (planApprovalRequested) {
+			const approvalPlan = formatPlanMarkdown(state.plan);
+			state = requestPlanApproval(state, approvalPlan, state.plan);
+			const finalInbound = drainAgentUpdates(state, agentRuntime);
+			state = finalInbound.state;
+			agentRuntime?.beginCompletion?.(state.agent.id);
+			if (finalInbound.changed) {
+				yield { type: "state", state };
+			}
+			for (const message of finalInbound.messages) {
+				yield { type: "message", message };
+			}
+			yield {
+				type: "plan_approval_request",
+				plan: approvalPlan,
+				state,
+			};
+			yield { type: "state", state };
+			const terminal: Terminal = { reason: "plan_approval", state };
+			yield { type: "terminal", terminal };
+			return terminal;
+		}
+	}
 
 	for (;;) {
 		throwIfAborted(signal);
@@ -171,7 +290,12 @@ export async function* query({
 		const toolCalls: { id: string; name: string; arguments: string }[] = [];
 
 		for await (const event of model.stream({
-			messages: await buildModelMessages(state, model, signal),
+			messages: await buildModelMessages(
+				state,
+				model,
+				baseSystemPrompt,
+				signal,
+			),
 			toolSpecs: state.toolSpecs,
 			signal,
 		})) {
@@ -266,43 +390,29 @@ export async function* query({
 			message: assistantMessage,
 		};
 
-		const results = await runToolCalls({
-			calls: toolCalls,
-			tools: runtimeTools,
-			context: {
-				getState: () => state,
-				setState(next) {
-					state = typeof next === "function" ? next(state) : next;
-				},
-				agentRuntime,
-				signal,
-			},
-			signal,
-		});
+		const approvalRequests = await collectToolApprovalRequests(
+			state,
+			toolCalls,
+			runtimeTools,
+		);
+		if (approvalRequests.length > 0) {
+			state = requestToolApproval(state, toolCalls, approvalRequests);
+			yield {
+				type: "tool_approval_request",
+				requests: approvalRequests,
+				state,
+			};
+			yield { type: "state", state };
+			const terminal: Terminal = { reason: "tool_approval", state };
+			yield { type: "terminal", terminal };
+			return terminal;
+		}
+
+		const results = await executeToolCalls(toolCalls);
 		let planApprovalRequested = false;
 		for (const result of results) {
 			const call = result.call;
-			const changedFiles = recordChangedFile(
-				state.changedFiles,
-				call.name,
-				result.args,
-				result.ok,
-			);
-			state = {
-				...state,
-				lastToolCall: { name: call.name, args: result.args },
-				observations: [...state.observations, result.observation],
-				toolExecutions: recordCompletedToolExecution(state.toolExecutions, {
-					callId: toolExecutionCallId(state, call.id),
-					tool: call.name,
-					args: result.args,
-					ok: result.ok,
-					turn: state.turn,
-					timestamp: new Date().toISOString(),
-				}),
-				changedFiles,
-				messages: [...state.messages, result.message],
-			};
+			state = applyToolCallResult(state, result);
 			yield {
 				type: "message",
 				message: result.message,
@@ -352,13 +462,31 @@ export async function* query({
 	}
 }
 
+async function loadProjectSystemPrompt(cwd: string): Promise<string> {
+	try {
+		return buildBaseSystemPrompt(
+			await loadProjectContext({ workspaceRoot: cwd, cwd }),
+		);
+	} catch (caught) {
+		return `${buildBaseSystemPrompt({
+			workspaceRoot: cwd,
+			cwd,
+			instructions: [],
+			warnings: [],
+		})}\n\nProject instruction loading failed and no project instruction file was trusted: ${formatCaught(caught)}`;
+	}
+}
+
 async function buildModelMessages(
 	state: AgentState,
 	model: ModelClient,
+	baseSystemPrompt: string,
 	signal?: AbortSignal,
 ): Promise<Message[]> {
 	throwIfAborted(signal);
-	const systemMessages: Message[] = [];
+	const systemMessages: Message[] = [
+		{ role: "system", content: baseSystemPrompt },
+	];
 	if (
 		state.messages.some(
 			(message) =>
@@ -539,6 +667,71 @@ function drainAgentUpdates(
 	};
 }
 
+async function collectToolApprovalRequests(
+	state: AgentState,
+	calls: readonly ToolCallRequest[],
+	tools: Tools,
+): Promise<ToolApprovalRequest[]> {
+	const requests: ToolApprovalRequest[] = [];
+	for (const call of calls) {
+		const tool = tools.find((candidate) => candidate.name === call.name);
+		if (!tool) {
+			continue;
+		}
+		try {
+			const args = tool.inputSchema.parse(JSON.parse(call.arguments)) as Record<
+				string,
+				unknown
+			>;
+			const decision = await getToolPermissionDecision(
+				state,
+				tool,
+				args,
+				call.id,
+			);
+			if (decision.kind === "ask") {
+				requests.push({
+					callId: call.id,
+					toolName: call.name,
+					args,
+					argumentFingerprint: toolArgumentFingerprint(args),
+					reason: decision.reason,
+				});
+			}
+		} catch {
+			// The normal runner produces the protocol-complete error tool result.
+		}
+	}
+	return requests;
+}
+
+function applyToolCallResult(
+	state: AgentState,
+	result: ToolCallResult,
+): AgentState {
+	const call = result.call;
+	return {
+		...state,
+		lastToolCall: { name: call.name, args: result.args },
+		observations: [...state.observations, result.observation],
+		toolExecutions: recordCompletedToolExecution(state.toolExecutions, {
+			callId: toolExecutionCallId(state, call.id),
+			tool: call.name,
+			args: result.args,
+			ok: result.ok,
+			turn: state.turn,
+			timestamp: new Date().toISOString(),
+		}),
+		changedFiles: recordChangedFile(
+			state.changedFiles,
+			call.name,
+			result.args,
+			result.ok,
+		),
+		messages: [...state.messages, result.message],
+	};
+}
+
 function recordChangedFile(
 	changedFiles: readonly string[],
 	toolName: string,
@@ -568,4 +761,8 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
 
 function toolExecutionCallId(state: AgentState, callId: string): string {
 	return state.agent.depth > 0 ? `${state.agent.id}:${callId}` : callId;
+}
+
+function formatCaught(caught: unknown): string {
+	return caught instanceof Error ? caught.message : String(caught);
 }

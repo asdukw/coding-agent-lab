@@ -1,4 +1,5 @@
-import { isAbsolute, resolve } from "node:path";
+import { lstat } from "node:fs/promises";
+import { isAbsolute, relative, resolve } from "node:path";
 import { isMemoryIndexPath, resolveMemoryWriteTarget } from "../memory";
 import {
 	isPathInside,
@@ -39,6 +40,11 @@ const PLAN_MODE_TOOL_NAMES = new Set([
 	CANCEL_AGENT_TOOL_NAME,
 ]);
 
+export type ToolPermissionDecision =
+	| { kind: "allow" }
+	| { kind: "ask"; reason: string }
+	| { kind: "deny"; reason: string };
+
 export function getToolsForMode(state: AgentState, tools: Tools): Tools {
 	if (state.toolPermissionContext.mode !== "plan") {
 		return tools.filter(
@@ -50,14 +56,114 @@ export function getToolsForMode(state: AgentState, tools: Tools): Tools {
 	}
 
 	return tools.filter((tool) => {
-		if (tool.name === "Write" || tool.name === "Edit") {
+		if (GENERIC_WRITE_TOOL_NAMES.has(tool.name)) {
 			return false;
 		}
 		return PLAN_MODE_TOOL_NAMES.has(tool.name);
 	});
 }
 
+export async function getToolPermissionDecision(
+	state: AgentState,
+	tool: Tool,
+	args: Record<string, unknown>,
+	callId?: string,
+): Promise<ToolPermissionDecision> {
+	try {
+		await enforceToolBoundary(state, tool, args);
+	} catch (caught) {
+		return { kind: "deny", reason: formatCaught(caught) };
+	}
+
+	if (!requiresInteractiveApproval(state, tool)) {
+		return { kind: "allow" };
+	}
+
+	const approval = approvalForCall(state, tool.name, args, callId);
+	if (approval === "allow") {
+		return { kind: "allow" };
+	}
+	if (approval === "deny") {
+		return { kind: "deny", reason: `User denied ${tool.name}` };
+	}
+	return { kind: "ask", reason: approvalReason(tool) };
+}
+
 export async function authorizeToolCall(
+	state: AgentState,
+	tool: Tool,
+	args: Record<string, unknown>,
+	callId?: string,
+): Promise<void> {
+	const decision = await getToolPermissionDecision(state, tool, args, callId);
+	if (decision.kind === "allow") {
+		return;
+	}
+	if (decision.kind === "ask") {
+		throw new Error(`${tool.name} requires user approval: ${decision.reason}`);
+	}
+	throw new Error(decision.reason);
+}
+
+export function isProtectedWorkspacePath(
+	workspaceRoot: string,
+	targetPath: string,
+	_agentType: AgentState["toolPermissionContext"]["agentType"] = "main",
+): boolean {
+	const root = resolve(workspaceRoot);
+	const target = resolve(targetPath);
+	if (!isPathInside(target, root)) {
+		return true;
+	}
+	if (isPathInside(target, resolve(root, ".cagent", "memory"))) {
+		return false;
+	}
+
+	const rel = relative(root, target);
+	const segments = rel.split(/[\\/]+/).filter(Boolean);
+	if (
+		process.platform === "win32" &&
+		segments.some((segment) => segment.includes(":"))
+	) {
+		return true;
+	}
+	return segments.some((segment) => {
+		const normalized = segment.toLowerCase();
+		return (
+			normalized === ".git" ||
+			normalized === ".cagent" ||
+			normalized === ".cagent-sandbox" ||
+			/^\.env(?:[.:]|$)/i.test(segment)
+		);
+	});
+}
+
+export async function isSafeWorkspaceReadPath(
+	workspaceRoot: string,
+	targetPath: string,
+	agentType: AgentState["toolPermissionContext"]["agentType"] = "main",
+): Promise<boolean> {
+	try {
+		const [canonicalRoot, canonicalTarget] = await Promise.all([
+			resolveRealPathForWrite(workspaceRoot),
+			resolveRealPathForWrite(targetPath),
+		]);
+		const entry = await lstat(canonicalTarget);
+		return (
+			isPathInside(canonicalTarget, canonicalRoot) &&
+			!isProtectedWorkspacePath(canonicalRoot, canonicalTarget, agentType) &&
+			(!entry.isFile() || entry.nlink === 1)
+		);
+	} catch {
+		return false;
+	}
+}
+
+export function toolArgumentFingerprint(args: Record<string, unknown>): string {
+	return stableStringify(args);
+}
+
+async function enforceToolBoundary(
 	state: AgentState,
 	tool: Tool,
 	args: Record<string, unknown>,
@@ -66,22 +172,34 @@ export async function authorizeToolCall(
 		if (PLAN_ONLY_TOOL_NAMES.has(tool.name)) {
 			throw new Error(`${tool.name} can only be used in plan mode`);
 		}
+		if (READ_ONLY_TOOL_NAMES.has(tool.name)) {
+			await authorizeReadToolCall(state, tool, args);
+		}
 		if (GENERIC_WRITE_TOOL_NAMES.has(tool.name)) {
+			if (
+				state.toolPermissionContext.agentType === "subagent" &&
+				!state.toolPermissionContext.sessionAllowedTools.includes(tool.name)
+			) {
+				throw new Error(
+					`${tool.name} was not delegated to this sub-agent by the main session`,
+				);
+			}
 			await authorizeWriteToolCall(state, tool, args);
 		}
 		if (
 			(tool.name === SHELL_TOOL_NAME || isMcpTool(tool)) &&
 			!isPrivilegedMainToolAllowed(state)
 		) {
-			throw new Error(
-				`${tool.name} is only available to the unrestricted main agent`,
-			);
+			throw new Error(`${tool.name} is only available to the main agent`);
 		}
 		return;
 	}
 
+	if (READ_ONLY_TOOL_NAMES.has(tool.name)) {
+		await authorizeReadToolCall(state, tool, args);
+		return;
+	}
 	if (
-		READ_ONLY_TOOL_NAMES.has(tool.name) ||
 		tool.name === ENTER_PLAN_MODE_TOOL_NAME ||
 		tool.name === EXIT_PLAN_MODE_TOOL_NAME ||
 		tool.name === UPDATE_PLAN_TOOL_NAME ||
@@ -92,23 +210,45 @@ export async function authorizeToolCall(
 	) {
 		return;
 	}
-
 	if (GENERIC_WRITE_TOOL_NAMES.has(tool.name)) {
 		throw new Error("Plan mode cannot write local files; use UpdatePlan");
 	}
-
 	throw new Error(`${tool.name} is not allowed in plan mode`);
 }
 
-function isPrivilegedMainToolAllowed(state: AgentState): boolean {
-	return (
-		state.toolPermissionContext.agentType === "main" &&
-		state.toolPermissionContext.writePolicy === undefined
-	);
-}
-
-function isMcpTool(tool: Tool): boolean {
-	return tool.name.startsWith("mcp__");
+async function authorizeReadToolCall(
+	state: AgentState,
+	tool: Tool,
+	args: Record<string, unknown>,
+): Promise<void> {
+	const argumentName = tool.name === "Read" ? "file_path" : "path";
+	const rawPath = args[argumentName] ?? ".";
+	if (typeof rawPath !== "string" || rawPath.trim() === "") {
+		throw new Error(`${tool.name} requires a valid ${argumentName}`);
+	}
+	const targetPath = resolvePath(state.cwd, rawPath);
+	const [canonicalRoot, canonicalTarget] = await Promise.all([
+		resolveRealPathForWrite(state.cwd),
+		resolveRealPathForWrite(targetPath),
+	]);
+	if (!isPathInside(canonicalTarget, canonicalRoot)) {
+		throw new Error(
+			`${tool.name} cannot read outside the workspace: ${rawPath}`,
+		);
+	}
+	if (
+		isProtectedWorkspacePath(
+			canonicalRoot,
+			canonicalTarget,
+			state.toolPermissionContext.agentType,
+		)
+	) {
+		throw new Error(`${tool.name} cannot access protected path: ${rawPath}`);
+	}
+	if (tool.name === "Read") {
+		await assertSingleLinkReadTarget(canonicalTarget, rawPath);
+	}
+	args[argumentName] = targetPath;
 }
 
 async function authorizeWriteToolCall(
@@ -138,14 +278,25 @@ async function authorizeWriteToolCall(
 		if (isMemoryIndexPath(targetPath)) {
 			throw new Error("MEMORY.md is managed automatically after extraction");
 		}
+		args.file_path = targetPath;
+		return;
 	}
 
 	args.file_path = targetPath;
+	const canonicalTarget = await resolveRealPathForWrite(targetPath);
+	const canonicalRoot = await resolveRealPathForWrite(state.cwd);
+	await assertNoMultiHardlink(targetPath, tool.name);
+	if (isMemoryIndexPath(canonicalTarget)) {
+		throw new Error("MEMORY.md is managed automatically after extraction");
+	}
+	if (isProtectedWorkspacePath(canonicalRoot, canonicalTarget)) {
+		throw new Error(`${tool.name} cannot modify protected path: ${filePath}`);
+	}
+
 	const policy = state.toolPermissionContext.writePolicy;
 	if (!policy) {
-		return;
+		throw new Error(`${tool.name} has no write policy`);
 	}
-	const canonicalTarget = await resolveRealPathForWrite(targetPath);
 	const memoryTarget = await resolveMemoryWriteTarget(state.cwd, targetPath);
 	const policyTargets = uniquePaths(
 		memoryTarget ? [canonicalTarget, memoryTarget] : [canonicalTarget],
@@ -165,11 +316,86 @@ async function authorizeWriteToolCall(
 			allowedRoots.some((root) => isPathInside(candidate, root)),
 		);
 		if (!allowed) {
-			throw new Error(
-				`${tool.name} is outside allowed write paths: ${filePath}`,
-			);
+			throw new Error(`${tool.name} is outside the workspace: ${filePath}`);
 		}
 	}
+}
+
+function requiresInteractiveApproval(state: AgentState, tool: Tool): boolean {
+	if (
+		state.toolPermissionContext.mode !== "normal" ||
+		state.toolPermissionContext.agentType !== "main"
+	) {
+		return false;
+	}
+	return (
+		GENERIC_WRITE_TOOL_NAMES.has(tool.name) ||
+		tool.name === SHELL_TOOL_NAME ||
+		isMcpTool(tool)
+	);
+}
+
+function approvalForCall(
+	state: AgentState,
+	toolName: string,
+	args: Record<string, unknown>,
+	callId: string | undefined,
+): "allow" | "deny" | undefined {
+	const pending = state.toolPermissionContext.pendingToolApproval;
+	if (pending?.decision) {
+		if (
+			callId === undefined ||
+			!pending.calls.some(
+				(call) => call.id === callId && call.name === toolName,
+			)
+		) {
+			return undefined;
+		}
+		const fingerprint = toolArgumentFingerprint(args);
+		const request = pending.requests.find(
+			(candidate) =>
+				candidate.callId === callId &&
+				candidate.toolName === toolName &&
+				candidate.argumentFingerprint === fingerprint &&
+				candidate.argumentFingerprint ===
+					toolArgumentFingerprint(candidate.args),
+		);
+		if (!request) {
+			return undefined;
+		}
+		if (pending.decision === "deny") {
+			return "deny";
+		}
+		if (
+			pending.decision === "allow_once" ||
+			pending.decision === "allow_session"
+		) {
+			return "allow";
+		}
+		return undefined;
+	}
+	if (state.toolPermissionContext.sessionAllowedTools.includes(toolName)) {
+		return "allow";
+	}
+	return undefined;
+}
+
+function approvalReason(tool: Tool): string {
+	if (tool.name === SHELL_TOOL_NAME) {
+		return "executes a PowerShell command that can read host-user files, write in the workspace, and use inherited network access";
+	}
+	if (isMcpTool(tool)) {
+		return "calls an external MCP tool whose side effects are not controlled by the workspace sandbox";
+	}
+	return `${tool.name} modifies files in the workspace`;
+}
+
+function isPrivilegedMainToolAllowed(state: AgentState): boolean {
+	return state.toolPermissionContext.agentType === "main";
+}
+
+function isMcpTool(tool: Tool): boolean {
+	return tool.name.startsWith("mcp__");
 }
 
 async function resolvePolicyRoots(
@@ -197,4 +423,67 @@ function uniquePaths(paths: string[]): string[] {
 
 function resolvePath(cwd: string, path: string): string {
 	return isAbsolute(path) ? resolve(path) : resolve(cwd, path);
+}
+
+function formatCaught(caught: unknown): string {
+	return caught instanceof Error ? caught.message : String(caught);
+}
+
+async function assertNoMultiHardlink(
+	targetPath: string,
+	toolName: string,
+): Promise<void> {
+	try {
+		const entry = await lstat(targetPath);
+		if (entry.isFile() && entry.nlink > 1) {
+			throw new Error(
+				`${toolName} cannot modify a file with multiple hard links: ${targetPath}`,
+			);
+		}
+	} catch (caught) {
+		if (
+			caught instanceof Error &&
+			"code" in caught &&
+			caught.code === "ENOENT"
+		) {
+			return;
+		}
+		throw caught;
+	}
+}
+
+async function assertSingleLinkReadTarget(
+	targetPath: string,
+	displayPath: string,
+): Promise<void> {
+	try {
+		const entry = await lstat(targetPath);
+		if (entry.isFile() && entry.nlink !== 1) {
+			throw new Error(
+				`Read cannot access a file with multiple hard links: ${displayPath}`,
+			);
+		}
+	} catch (caught) {
+		if (
+			caught instanceof Error &&
+			"code" in caught &&
+			caught.code === "ENOENT"
+		) {
+			return;
+		}
+		throw caught;
+	}
+}
+
+function stableStringify(value: unknown): string {
+	if (Array.isArray(value)) {
+		return `[${value.map(stableStringify).join(",")}]`;
+	}
+	if (value && typeof value === "object") {
+		return `{${Object.entries(value as Record<string, unknown>)
+			.sort(([left], [right]) => left.localeCompare(right))
+			.map(([key, entry]) => `${JSON.stringify(key)}:${stableStringify(entry)}`)
+			.join(",")}}`;
+	}
+	return JSON.stringify(value) ?? "undefined";
 }

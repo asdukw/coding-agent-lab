@@ -136,6 +136,8 @@ function createChildState(params: {
 		toolPermissionContext: createToolPermissionContext(params.parentState.cwd, {
 			agentType: "subagent",
 			writePolicy: params.parentState.toolPermissionContext.writePolicy,
+			sessionAllowedTools:
+				params.parentState.toolPermissionContext.sessionAllowedTools,
 		}),
 		messages: [
 			{

@@ -1,6 +1,6 @@
 import { Box, Text } from "ink";
 import TextInput from "ink-text-input";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { InProcessAgentManager } from "../agents/manager";
 import { ensureMemoryStore, formatMemoryStoreSummary } from "../memory";
 import { runMemoryExtractionSubAgent } from "../memoryExtract";
@@ -20,6 +20,8 @@ import {
 	createInitialState,
 	enterPlanMode,
 	resolvePlanApproval,
+	resolveToolApproval,
+	type ToolApprovalDecision,
 } from "../state";
 import { BUILTIN_TOOLS } from "../tools";
 import { type Tools, toToolSpecs } from "../tools/types";
@@ -98,6 +100,7 @@ export function App({
 	);
 	const [streamingText, setStreamingText] = useState("");
 	const [status, setStatus] = useState<"idle" | "running">("idle");
+	const runInFlightRef = useRef(false);
 	const [input, setInput] = useState("");
 	const [error, setError] = useState<string | undefined>();
 	const [agentInboxRevision, setAgentInboxRevision] = useState(0);
@@ -108,10 +111,11 @@ export function App({
 			userText: string,
 			persistFromMessageIndex: number,
 		) => {
-			if (status === "running") {
+			if (runInFlightRef.current) {
 				return;
 			}
 
+			runInFlightRef.current = true;
 			setStatus("running");
 			setStreamingText("");
 			setError(undefined);
@@ -184,24 +188,32 @@ export function App({
 								},
 							]);
 							setStreamingText("");
-							setStatus("idle");
 						}
 					}
 				} catch (caught) {
 					setAgentState(latestState);
 					setError(caught instanceof Error ? caught.message : String(caught));
 					setStreamingText("");
+				} finally {
+					runInFlightRef.current = false;
 					setStatus("idle");
 				}
 			})();
 		},
-		[agentRuntime, cwd, model, status, tools],
+		[agentRuntime, cwd, model, tools],
 	);
 
 	const runTurn = useCallback(
 		(text: string) => {
 			const trimmed = text.trim();
 			if (!trimmed || status === "running") {
+				return;
+			}
+			if (
+				agentState?.toolPermissionContext.pendingToolApproval ||
+				agentState?.toolPermissionContext.pendingPlanApproval
+			) {
+				setError("Resolve the pending approval before starting a new turn.");
 				return;
 			}
 
@@ -243,6 +255,7 @@ export function App({
 			status !== "idle" ||
 			!agentState ||
 			agentState.toolPermissionContext.pendingPlanApproval ||
+			agentState.toolPermissionContext.pendingToolApproval ||
 			agentState.transition?.reason === "max_turns" ||
 			agentState.budget.turnsUsed >= agentState.budget.maxTurns ||
 			!agentRuntime.hasPendingMessages(agentState.agent.id)
@@ -252,8 +265,55 @@ export function App({
 		runState(agentState, "sub-agent notification", agentState.messages.length);
 	}, [agentInboxRevision, agentRuntime, agentState, runState, status]);
 
+	useEffect(() => {
+		if (
+			status !== "idle" ||
+			!agentState?.toolPermissionContext.pendingToolApproval?.needsRevalidation
+		) {
+			return;
+		}
+		runState(
+			agentState,
+			"refresh restored tool approval",
+			agentState.messages.length,
+		);
+	}, [agentState, runState, status]);
+
 	const handleSubmit = (value: string) => {
 		setInput("");
+		const toolApproval = parseToolApprovalInput(value);
+		if (agentState?.toolPermissionContext.pendingToolApproval) {
+			if (
+				agentState.toolPermissionContext.pendingToolApproval.needsRevalidation
+			) {
+				setError(
+					"Refreshing restored tool approval details; try again shortly.",
+				);
+				runState(
+					agentState,
+					"refresh restored tool approval",
+					agentState.messages.length,
+				);
+				return;
+			}
+			if (!toolApproval) {
+				setError(
+					'Type "allow" for this batch, "always" for this session, or "deny".',
+				);
+				return;
+			}
+
+			const nextState = resolveToolApproval(agentState, toolApproval);
+			const approvalLabel =
+				toolApproval === "allow_once"
+					? "allow tool calls once"
+					: toolApproval === "allow_session"
+						? "always allow these tools for this session"
+						: "deny tool calls";
+			runState(nextState, approvalLabel, agentState.messages.length);
+			return;
+		}
+
 		const approval = parsePlanApprovalInput(value);
 		if (agentState?.toolPermissionContext.pendingPlanApproval) {
 			if (!approval) {
@@ -350,6 +410,8 @@ export function App({
 
 	const pendingPlanApproval =
 		agentState?.toolPermissionContext.pendingPlanApproval;
+	const pendingToolApproval =
+		agentState?.toolPermissionContext.pendingToolApproval;
 
 	return (
 		<Box flexDirection="column" gap={1}>
@@ -388,6 +450,38 @@ export function App({
 
 			{error ? <Text color="red">error: {error}</Text> : null}
 
+			{pendingToolApproval ? (
+				<Box
+					borderStyle="round"
+					borderColor="yellow"
+					flexDirection="column"
+					paddingX={1}
+				>
+					<Text color="yellow">tool approval</Text>
+					{pendingToolApproval.calls.map((call) => {
+						const request = pendingToolApproval.requests.find(
+							(candidate) =>
+								candidate.callId === call.id &&
+								candidate.toolName === call.name,
+						);
+						return (
+							<Box flexDirection="column" key={call.id}>
+								<Text color="cyan">{call.name}</Text>
+								<Text>{formatApprovalArguments(call.arguments)}</Text>
+								<Text color="gray">
+									{request?.reason ??
+										"This call is included because the entire batch is paused."}
+								</Text>
+							</Box>
+						);
+					})}
+					<Text color="gray">
+						Type "allow" for this batch, "always" for these tools during this
+						process session, or "deny". Static path boundaries still apply.
+					</Text>
+				</Box>
+			) : null}
+
 			{pendingPlanApproval ? (
 				<Box
 					borderStyle="round"
@@ -411,9 +505,11 @@ export function App({
 						onChange={setInput}
 						onSubmit={handleSubmit}
 						placeholder={
-							pendingPlanApproval
-								? "approve or reject with feedback..."
-								: "Type a message and press Enter..."
+							pendingToolApproval
+								? "allow, always, or deny..."
+								: pendingPlanApproval
+									? "approve or reject with feedback..."
+									: "Type a message and press Enter..."
 						}
 					/>
 				</Box>
@@ -451,4 +547,38 @@ function parsePlanApprovalInput(
 	}
 
 	return undefined;
+}
+
+function parseToolApprovalInput(
+	value: string,
+): ToolApprovalDecision | undefined {
+	const normalized = value.trim().toLowerCase().replace(/\s+/g, " ");
+	if (["allow", "allow once", "once", "yes", "y"].includes(normalized)) {
+		return "allow_once";
+	}
+	if (
+		["always", "allow always", "always allow", "allow session"].includes(
+			normalized,
+		)
+	) {
+		return "allow_session";
+	}
+	if (["deny", "no", "n"].includes(normalized)) {
+		return "deny";
+	}
+	return undefined;
+}
+
+function formatApprovalArguments(argumentsText: string): string {
+	let value = argumentsText;
+	try {
+		value = JSON.stringify(JSON.parse(argumentsText), null, 2) ?? argumentsText;
+	} catch {
+		// Invalid JSON is still shown verbatim and will fail schema validation.
+	}
+	return value.replace(
+		/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g,
+		(character) =>
+			`\\u${character.codePointAt(0)?.toString(16).padStart(4, "0")}`,
+	);
 }

@@ -110,9 +110,11 @@ test("plan mode switches tool specs, writes a plan, and pauses for approval", as
 	expect(planToolNames).toContain(EXIT_PLAN_MODE_TOOL_NAME);
 	expect(planToolNames).not.toContain("Write");
 	expect(planToolNames).not.toContain("Edit");
-	expect(model.requests[1]?.messages[0]?.content).toContain(
-		"Plan mode is active",
-	);
+	expect(
+		model.requests[1]?.messages.some((message) =>
+			message.content.includes("Plan mode is active"),
+		),
+	).toBe(true);
 
 	const approvedState = resolvePlanApproval(terminal.state, "approve");
 	expect(approvedState.toolPermissionContext.mode).toBe("normal");

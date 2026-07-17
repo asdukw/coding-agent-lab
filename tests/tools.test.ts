@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { link, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
@@ -13,6 +13,7 @@ import { BUILTIN_TOOLS } from "../src/tools";
 import { editTool } from "../src/tools/editTool";
 import { globTool } from "../src/tools/globTool";
 import { grepTool } from "../src/tools/grepTool";
+import { getToolPermissionDecision } from "../src/tools/permissions";
 import { readTool } from "../src/tools/readTool";
 import { RuntimeResourceLock } from "../src/tools/resourceLock";
 import { runToolCalls } from "../src/tools/runner";
@@ -222,6 +223,51 @@ test("grepTool finds matching files and lines", async () => {
 		output_mode: "count",
 	});
 	expect(countResult.output).toBe("3");
+});
+
+test("globTool and grepTool filter protected paths from explicit patterns", async () => {
+	const dir = await makeTempDir();
+	try {
+		await writeFile(join(dir, ".env.local"), "secret marker");
+		await link(join(dir, ".env.local"), join(dir, "secret-alias.txt"));
+		await writeFile(join(dir, "visible.txt"), "public marker");
+		let state = createInitialState("inspect protected paths", dir);
+		const context: ToolContext = {
+			getState: () => state,
+			setState(next) {
+				state = typeof next === "function" ? next(state) : next;
+			},
+		};
+
+		const protectedGlob = await globTool.call(
+			{ pattern: ".env.local", path: dir },
+			context,
+		);
+		expect(protectedGlob.filenames).toEqual([]);
+		const hardLinkGlob = await globTool.call(
+			{ pattern: "secret-alias.txt", path: dir },
+			context,
+		);
+		expect(hardLinkGlob.filenames).toEqual([]);
+
+		const protectedGrep = await grepTool.call(
+			{ pattern: "secret", path: dir, glob: ".env.local" },
+			context,
+		);
+		expect(protectedGrep.output).toBe("");
+		const hardLinkRead = await getToolPermissionDecision(state, readTool, {
+			file_path: join(dir, "secret-alias.txt"),
+		});
+		expect(hardLinkRead.kind).toBe("deny");
+
+		const visibleGrep = await grepTool.call(
+			{ pattern: "public", path: dir, glob: "visible.txt" },
+			context,
+		);
+		expect(visibleGrep.output).toBe("visible.txt");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
 });
 
 test("runtime resource lock supports readers, writer fairness, and subtree conflicts", async () => {

@@ -1,6 +1,8 @@
 import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { glob } from "glob";
 import { z } from "zod";
+import { isSafeWorkspaceReadPath } from "./permissions";
 import { fileResourceAccesses, resolveToolPath } from "./resourceLock";
 import type { Tool } from "./types";
 
@@ -39,20 +41,35 @@ export const grepTool: Tool<Input, Output> = {
 		input.path = resolveToolPath(cwd, input.path ?? ".");
 		return fileResourceAccesses(input.path, "read", "subtree");
 	},
-	async call({
-		pattern,
-		path,
-		glob: globFilter,
-		ignore_case,
-		output_mode = "files_with_matches",
-	}) {
+	async call(
+		{
+			pattern,
+			path,
+			glob: globFilter,
+			ignore_case,
+			output_mode = "files_with_matches",
+		},
+		context,
+	) {
 		const cwd = path ?? process.cwd();
+		const state = context?.getState();
+		const workspaceRoot = state?.cwd ?? cwd;
 		const regex = new RegExp(pattern, ignore_case ? "i" : "");
-		const files = await glob(globFilter ?? "**/*", {
+		const discovered = await glob(globFilter ?? "**/*", {
 			cwd,
 			nodir: true,
 			ignore: DEFAULT_IGNORE,
 		});
+		const safe = await Promise.all(
+			discovered.map((file) =>
+				isSafeWorkspaceReadPath(
+					workspaceRoot,
+					resolve(cwd, file),
+					state?.toolPermissionContext.agentType,
+				),
+			),
+		);
+		const files = discovered.filter((_file, index) => safe[index]);
 
 		const filesWithMatches: string[] = [];
 		const matchingLines: string[] = [];

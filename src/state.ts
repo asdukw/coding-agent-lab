@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { resolve } from "node:path";
 import type { AgentIdentity } from "./agents/identity";
 import type { ToolExecution } from "./toolExecutionMemory";
 import type { ToolSpec } from "./tools/types";
@@ -65,6 +66,32 @@ export type PendingPlanApproval = {
 	runtimePlan: RuntimePlan;
 };
 
+export type PendingToolCall = {
+	id: string;
+	name: string;
+	arguments: string;
+};
+
+export type ToolApprovalRequest = {
+	callId: string;
+	toolName: string;
+	args: Record<string, unknown>;
+	argumentFingerprint: string;
+	reason: string;
+};
+
+export type ToolApprovalDecision = "allow_once" | "allow_session" | "deny";
+
+export type PendingToolApproval = {
+	calls: PendingToolCall[];
+	requests: ToolApprovalRequest[];
+	decision?: ToolApprovalDecision;
+	decisionId?: string;
+	needsRevalidation?: boolean;
+};
+
+const consumedToolApprovalDecisionIds = new Set<string>();
+
 export type ToolPermissionContext = {
 	mode: AgentMode;
 	agentType: AgentType;
@@ -72,8 +99,11 @@ export type ToolPermissionContext = {
 		allow?: string[];
 		deny?: string[];
 	};
+	/** Tool names approved for the lifetime of the current process session. */
+	sessionAllowedTools: string[];
 	prePlanMode?: AgentMode;
 	pendingPlanApproval?: PendingPlanApproval;
+	pendingToolApproval?: PendingToolApproval;
 };
 
 export type TransitionReason =
@@ -85,6 +115,8 @@ export type TransitionReason =
 	| "plan_approval"
 	| "plan_approved"
 	| "plan_rejected"
+	| "permission_approval"
+	| "permission_approved"
 	| "permission_denied";
 
 export type AgentState = {
@@ -131,7 +163,7 @@ export function createInitialState(
 		task,
 		cwd,
 		toolSpecs: tools,
-		toolPermissionContext: createToolPermissionContext(),
+		toolPermissionContext: createToolPermissionContext(cwd),
 		plan: createEmptyPlan(),
 		messages: [{ role: "user", content: task }],
 		todos: [],
@@ -164,12 +196,14 @@ export function createToolPermissionContext(
 		mode?: AgentMode;
 		agentType?: AgentType;
 		writePolicy?: ToolPermissionContext["writePolicy"];
+		sessionAllowedTools?: string[];
 	} = {},
 ): ToolPermissionContext {
 	return {
 		mode: options.mode ?? "normal",
 		agentType: options.agentType ?? "main",
-		writePolicy: options.writePolicy,
+		writePolicy: options.writePolicy ?? defaultWritePolicy(_cwd),
+		sessionAllowedTools: uniqueStrings(options.sessionAllowedTools ?? []),
 	};
 }
 
@@ -299,6 +333,178 @@ export function resolvePlanApproval(
 	};
 }
 
+export function requestToolApproval(
+	prev: AgentState,
+	calls: readonly PendingToolCall[],
+	requests: readonly ToolApprovalRequest[],
+): AgentState {
+	const state = ensureToolPermissionContext(prev);
+	if (requests.length === 0) {
+		return state;
+	}
+	return {
+		...state,
+		toolPermissionContext: {
+			...state.toolPermissionContext,
+			pendingToolApproval: {
+				calls: calls.map((call) => ({ ...call })),
+				requests: requests.map((request) => ({
+					...request,
+					args: { ...request.args },
+				})),
+			},
+		},
+		transition: { reason: "permission_approval" },
+	};
+}
+
+export function resolveToolApproval(
+	prev: AgentState,
+	decision: ToolApprovalDecision,
+): AgentState {
+	const state = ensureToolPermissionContext(prev);
+	const pending = state.toolPermissionContext.pendingToolApproval;
+	if (!pending) {
+		return state;
+	}
+	return {
+		...state,
+		toolPermissionContext: {
+			...state.toolPermissionContext,
+			pendingToolApproval: {
+				...pending,
+				decision,
+				decisionId: randomUUID(),
+			},
+		},
+		transition: {
+			reason: decision === "deny" ? "permission_denied" : "permission_approved",
+		},
+	};
+}
+
+export function replaceToolApprovalRequests(
+	prev: AgentState,
+	requests: readonly ToolApprovalRequest[],
+): AgentState {
+	const state = ensureToolPermissionContext(prev);
+	const pending = state.toolPermissionContext.pendingToolApproval;
+	if (!pending) {
+		return state;
+	}
+	return {
+		...state,
+		toolPermissionContext: {
+			...state.toolPermissionContext,
+			pendingToolApproval: {
+				calls: pending.calls.map((call) => ({ ...call })),
+				requests: requests.map((request) => ({
+					...request,
+					args: { ...request.args },
+				})),
+				needsRevalidation: false,
+			},
+		},
+	};
+}
+
+export function claimToolApprovalDecision(state: AgentState): boolean {
+	const pending = state.toolPermissionContext.pendingToolApproval;
+	if (!pending?.decision || !pending.decisionId) {
+		return false;
+	}
+	if (consumedToolApprovalDecisionIds.has(pending.decisionId)) {
+		return false;
+	}
+	consumedToolApprovalDecisionIds.add(pending.decisionId);
+	return true;
+}
+
+export function clearToolApproval(prev: AgentState): AgentState {
+	const state = ensureToolPermissionContext(prev);
+	const pending = state.toolPermissionContext.pendingToolApproval;
+	if (!pending) {
+		return state;
+	}
+	const sessionAllowedTools =
+		pending.decision === "allow_session" && !pending.needsRevalidation
+			? uniqueStrings([
+					...state.toolPermissionContext.sessionAllowedTools,
+					...approvedPendingToolNames(pending),
+				])
+			: state.toolPermissionContext.sessionAllowedTools;
+	return {
+		...state,
+		toolPermissionContext: {
+			...state.toolPermissionContext,
+			sessionAllowedTools,
+			pendingToolApproval: undefined,
+		},
+	};
+}
+
+function approvedPendingToolNames(pending: PendingToolApproval): string[] {
+	return pending.requests
+		.filter(
+			(request) =>
+				request.argumentFingerprint ===
+					approvalArgumentFingerprint(request.args) &&
+				pending.calls.some(
+					(call) =>
+						call.id === request.callId && call.name === request.toolName,
+				),
+		)
+		.map((request) => request.toolName);
+}
+
+export function completedPendingToolCallIds(
+	messages: readonly Message[],
+	calls: readonly PendingToolCall[],
+): Set<string> {
+	let batchMessageIndex = -1;
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const message = messages[index];
+		if (
+			message?.role === "assistant" &&
+			toolCallBatchesEqual(message.toolCalls, calls)
+		) {
+			batchMessageIndex = index;
+			break;
+		}
+	}
+	if (batchMessageIndex < 0) {
+		return new Set();
+	}
+
+	const pendingIds = new Set(calls.map((call) => call.id));
+	return new Set(
+		messages
+			.slice(batchMessageIndex + 1)
+			.filter(
+				(message) =>
+					message.role === "tool" &&
+					message.toolCallId !== undefined &&
+					pendingIds.has(message.toolCallId),
+			)
+			.map((message) => message.toolCallId as string),
+	);
+}
+
+function toolCallBatchesEqual(
+	left: readonly PendingToolCall[] | undefined,
+	right: readonly PendingToolCall[],
+): boolean {
+	return (
+		left?.length === right.length &&
+		left.every(
+			(call, index) =>
+				call.id === right[index]?.id &&
+				call.name === right[index]?.name &&
+				call.arguments === right[index]?.arguments,
+		)
+	);
+}
+
 function createEmptyPlan(): RuntimePlan {
 	return { items: [] };
 }
@@ -308,10 +514,92 @@ export function normalizeToolPermissionContext(
 	cwd?: string,
 ): ToolPermissionContext {
 	const defaults = createToolPermissionContext(cwd);
+	const mode = context?.mode === "plan" ? "plan" : "normal";
+	const agentType =
+		context?.agentType === "subagent" || context?.agentType === "memory"
+			? context.agentType
+			: "main";
 	return {
 		...defaults,
 		...context,
-		mode: context?.mode ?? defaults.mode,
-		agentType: context?.agentType ?? defaults.agentType,
+		mode,
+		agentType,
+		writePolicy: normalizeWritePolicy(
+			context?.writePolicy,
+			defaults.writePolicy,
+		),
+		sessionAllowedTools: uniqueStrings(context?.sessionAllowedTools),
+		prePlanMode:
+			context?.prePlanMode === "normal" || context?.prePlanMode === "plan"
+				? context.prePlanMode
+				: undefined,
 	};
+}
+
+function defaultWritePolicy(
+	cwd: string | undefined,
+): ToolPermissionContext["writePolicy"] {
+	if (!cwd) {
+		return undefined;
+	}
+	const workspaceRoot = resolve(cwd);
+	return {
+		allow: [workspaceRoot],
+		deny: [
+			resolve(workspaceRoot, ".git"),
+			resolve(workspaceRoot, ".env"),
+			resolve(workspaceRoot, ".cagent-sandbox"),
+		],
+	};
+}
+
+function normalizeWritePolicy(
+	value: unknown,
+	fallback: ToolPermissionContext["writePolicy"],
+): ToolPermissionContext["writePolicy"] {
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		return fallback;
+	}
+	const candidate = value as Record<string, unknown>;
+	const hasAllow = Array.isArray(candidate.allow);
+	const hasDeny = Array.isArray(candidate.deny);
+	if (!hasAllow && !hasDeny) {
+		return fallback;
+	}
+	return {
+		allow: hasAllow ? uniqueStrings(candidate.allow) : undefined,
+		deny: hasDeny ? uniqueStrings(candidate.deny) : undefined,
+	};
+}
+
+function uniqueStrings(values: unknown): string[] {
+	if (!Array.isArray(values)) {
+		return [];
+	}
+	return [
+		...new Set(
+			values
+				.filter(
+					(value): value is string =>
+						typeof value === "string" && value.trim().length > 0,
+				)
+				.map((value) => value.trim()),
+		),
+	];
+}
+
+function approvalArgumentFingerprint(value: unknown): string {
+	if (Array.isArray(value)) {
+		return `[${value.map(approvalArgumentFingerprint).join(",")}]`;
+	}
+	if (value && typeof value === "object") {
+		return `{${Object.entries(value as Record<string, unknown>)
+			.sort(([left], [right]) => left.localeCompare(right))
+			.map(
+				([key, entry]) =>
+					`${JSON.stringify(key)}:${approvalArgumentFingerprint(entry)}`,
+			)
+			.join(",")}}`;
+	}
+	return JSON.stringify(value) ?? "undefined";
 }

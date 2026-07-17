@@ -206,7 +206,15 @@ test("context compaction replaces restored session history", async () => {
 		await appendSessionCompaction(cwd, compacted);
 
 		const restored = await loadSession(cwd, state.sessionId);
-		expect(restored.messages).toEqual(compacted.messages);
+		expect(restored.messages).toEqual([
+			{
+				role: "agent",
+				content:
+					"[restored-session:untrusted-system-message]\n## Auto-compacted conversation summary\n\nfirst task",
+				containsUntrustedAgentContent: true,
+			},
+			{ role: "user", content: "continue with the current task" },
+		]);
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}

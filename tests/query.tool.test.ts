@@ -47,6 +47,15 @@ async function makeTempDir(): Promise<string> {
 	return mkdtemp(join(tmpdir(), "cagent-query-"));
 }
 
+function createWriteApprovedState(task: string, cwd: string) {
+	return {
+		...createInitialState(task, cwd),
+		toolPermissionContext: createToolPermissionContext(cwd, {
+			sessionAllowedTools: ["Write"],
+		}),
+	};
+}
+
 class FakeToolCallingModelClient implements ModelClient {
 	readonly name = "fake";
 	readonly requests: ModelRequest[] = [];
@@ -240,6 +249,7 @@ test("normal mode write policy allows configured paths", async () => {
 		const initialState = {
 			...createInitialState("write allowed", cwd),
 			toolPermissionContext: createToolPermissionContext(cwd, {
+				sessionAllowedTools: ["Write"],
 				writePolicy: {
 					allow: [join(cwd, "allowed")],
 					deny: [join(cwd, "blocked")],
@@ -316,7 +326,7 @@ test("an unsafe memory directory does not block unrelated normal writes", async 
 		const normalPath = join(cwd, "normal.txt");
 		let terminal: Terminal | undefined;
 		for await (const event of query({
-			initialState: createInitialState("write normal file", cwd),
+			initialState: createWriteApprovedState("write normal file", cwd),
 			model: new WritePathModelClient(normalPath, "normal content"),
 			tools: [writeTool],
 		})) {
@@ -463,7 +473,7 @@ test("main agent writes inside memory use the strict memory validator", async ()
 		const invalidPath = join(cwd, ".cagent", "memory", "invalid.md");
 		let terminal: Terminal | undefined;
 		for await (const event of query({
-			initialState: createInitialState("write invalid memory", cwd),
+			initialState: createWriteApprovedState("write invalid memory", cwd),
 			model: new WritePathModelClient(invalidPath),
 			tools: [writeTool],
 		})) {
@@ -495,7 +505,10 @@ test("main agent cannot bypass memory validation through a directory alias", asy
 		const invalidPath = join(aliasPath, "invalid.md");
 		let terminal: Terminal | undefined;
 		for await (const event of query({
-			initialState: createInitialState("write invalid aliased memory", cwd),
+			initialState: createWriteApprovedState(
+				"write invalid aliased memory",
+				cwd,
+			),
 			model: new WritePathModelClient(invalidPath),
 			tools: [writeTool],
 		})) {
@@ -515,7 +528,10 @@ test("main agent cannot bypass memory validation through a directory alias", asy
 		const originalIndex = await readFile(getMemoryIndexPath(cwd), "utf8");
 		terminal = undefined;
 		for await (const event of query({
-			initialState: createInitialState("overwrite aliased memory index", cwd),
+			initialState: createWriteApprovedState(
+				"overwrite aliased memory index",
+				cwd,
+			),
 			model: new WritePathModelClient(join(aliasPath, "memory.md")),
 			tools: [writeTool],
 		})) {
@@ -558,7 +574,7 @@ test("main agent cannot bypass memory validation through outside hardlinks", asy
 
 		let terminal: Terminal | undefined;
 		for await (const event of query({
-			initialState: createInitialState("overwrite hardlinked topic", cwd),
+			initialState: createWriteApprovedState("overwrite hardlinked topic", cwd),
 			model: new WritePathModelClient(outsideTopicLink, "INVALID_TOPIC"),
 			tools: [writeTool],
 		})) {
@@ -575,7 +591,7 @@ test("main agent cannot bypass memory validation through outside hardlinks", asy
 		await link(indexPath, outsideIndexLink);
 		terminal = undefined;
 		for await (const event of query({
-			initialState: createInitialState("overwrite hardlinked index", cwd),
+			initialState: createWriteApprovedState("overwrite hardlinked index", cwd),
 			model: new WritePathModelClient(outsideIndexLink, "PWNED_INDEX"),
 			tools: [writeTool],
 		})) {
@@ -613,7 +629,7 @@ test("valid main agent memory writes refresh MEMORY.md automatically", async () 
 		].join("\n");
 		let terminal: Terminal | undefined;
 		for await (const event of query({
-			initialState: createInitialState("remember preference", cwd),
+			initialState: createWriteApprovedState("remember preference", cwd),
 			model: new WritePathModelClient(memoryPath, content),
 			tools: [writeTool],
 		})) {
@@ -749,9 +765,10 @@ test("query injects the memory prompt from the current memory index", async () =
 		}
 
 		const request = model.requests[0];
-		expect(request?.messages[0]?.role).toBe("system");
-		expect(request?.messages[0]?.content).toContain("# cagent memory");
-		expect(request?.messages[0]?.content).toContain("prefers concise answers");
+		const memoryPrompt = request?.messages.find((message) =>
+			message.content.includes("# cagent memory"),
+		)?.content;
+		expect(memoryPrompt).toContain("prefers concise answers");
 		expect(request?.messages.at(-1)).toEqual({
 			role: "user",
 			content: "use memory",

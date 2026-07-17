@@ -10,7 +10,7 @@
 		"dev": "bun --no-env-file --watch src/main.tsx",
 		"build:sandbox": "\"$SYSTEMROOT/System32/WindowsPowerShell/v1.0/powershell.exe\" -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows-sandbox.ps1",
 		"check": "tsc --noEmit",
-		"test": "bun test tests/agentMailbox.test.ts tests/agentManager.test.ts tests/app.test.tsx tests/compact.test.ts tests/localCommands.test.ts tests/mcp.test.ts tests/memory.test.ts tests/memoryExtract.test.ts tests/deepseekConnectivity.test.ts tests/query.agentMessages.test.ts tests/query.tool.test.ts tests/sessionStore.test.ts tests/tools.test.ts",
+		"test": "bun test tests/agentMailbox.test.ts tests/agentManager.test.ts tests/app.test.tsx tests/compact.test.ts tests/localCommands.test.ts tests/mcp.test.ts tests/memory.test.ts tests/memoryExtract.test.ts tests/deepseekConnectivity.test.ts tests/query.agentMessages.test.ts tests/query.tool.test.ts tests/sessionStore.test.ts tests/tools.test.ts tests/permissionApproval.test.ts tests/projectContext.test.ts",
 		"test:deepseek": "bun test tests/deepseekConnectivity.test.ts",
 		"lint": "biome check src tests package.json tsconfig.json",
 		"format": "biome format --write src tests package.json tsconfig.json",

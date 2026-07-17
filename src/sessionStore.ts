@@ -12,8 +12,10 @@ import {
 	type AgentState,
 	type BudgetState,
 	type CompactionState,
+	completedPendingToolCallIds,
 	type Message,
 	normalizeToolPermissionContext,
+	type PendingToolApproval,
 	type RuntimePlan,
 	type ToolPermissionContext,
 } from "./state";
@@ -233,7 +235,9 @@ export async function appendSessionState(
 		sessionId: state.sessionId,
 		payload: {
 			task: state.task,
-			toolPermissionContext: state.toolPermissionContext,
+			toolPermissionContext: persistableToolPermissionContext(
+				state.toolPermissionContext,
+			),
 			plan: state.plan,
 			turn: state.turn,
 			budget: state.budget,
@@ -362,7 +366,9 @@ export async function saveSession(
 			sessionId: state.sessionId,
 			payload: {
 				task: state.task,
-				toolPermissionContext: state.toolPermissionContext,
+				toolPermissionContext: persistableToolPermissionContext(
+					state.toolPermissionContext,
+				),
 				plan: state.plan,
 				turn: state.turn,
 				budget: state.budget,
@@ -390,7 +396,10 @@ export async function loadSession(
 	const path = getSessionPath(cwd, sessionId);
 	try {
 		const raw = await readFile(path, "utf8");
-		return fromStoredSessionState(replaySessionEvents(raw, sessionId, cwd));
+		return fromStoredSessionState(
+			replaySessionEvents(raw, sessionId, cwd),
+			cwd,
+		);
 	} catch (caught) {
 		if (!isNotFoundError(caught)) {
 			throw caught;
@@ -632,7 +641,7 @@ async function loadLegacySession(
 		throw new Error(`session id mismatch in file: ${path}`);
 	}
 
-	return fromStoredSessionState(storedState);
+	return fromStoredSessionState(storedState, cwd);
 }
 
 function getSessionFilePath(
@@ -663,39 +672,393 @@ function getSessionFilePath(
 
 function fromStoredSessionState(
 	state: Partial<StoredSessionState>,
+	trustedCwd?: string,
 ): AgentState {
-	const budget = state.budget ?? { turnsUsed: 0, maxTurns: 20 };
-	const cwd = state.cwd ?? process.cwd();
-	const messages = state.messages ?? [];
+	const budget = normalizeRestoredBudget(state.budget);
+	// Session files are workspace-writable. The caller-provided root is the trust
+	// boundary; a stored cwd must never expand it during resume.
+	const cwd = resolve(trustedCwd ?? state.cwd ?? process.cwd());
+	const messages = validateRestoredMessages(state.messages);
 	return {
 		agent: {
 			id: state.sessionId ?? "",
-			type:
-				state.toolPermissionContext?.agentType === "memory" ? "memory" : "main",
-			depth: state.toolPermissionContext?.agentType === "memory" ? 1 : 0,
+			type: "main",
+			depth: 0,
 		},
 		sessionId: state.sessionId ?? "",
-		task: state.task ?? "",
+		task: typeof state.task === "string" ? state.task : "",
 		cwd,
 		toolSpecs: toToolSpecs(BUILTIN_TOOLS),
 		toolPermissionContext: normalizeToolPermissionContext(
-			state.toolPermissionContext,
+			restoredPermissionContext(state.toolPermissionContext, messages),
 			cwd,
 		),
-		plan: state.plan ?? { items: [] },
+		plan: normalizeRestoredPlan(state.plan),
 		messages,
 		todos: [],
 		observations: [],
-		toolExecutions: state.toolExecutions?.length
-			? state.toolExecutions
-			: deriveToolExecutions(messages),
-		changedFiles: state.changedFiles ?? [],
-		turn: state.turn ?? budget.turnsUsed,
+		// Rebuild bounded execution memory from validated messages instead of
+		// trusting a writable snapshot to inject system-level history.
+		toolExecutions: deriveToolExecutions(messages),
+		changedFiles: Array.isArray(state.changedFiles)
+			? state.changedFiles.filter(
+					(path): path is string => typeof path === "string",
+				)
+			: [],
+		turn: boundedNonNegativeInteger(state.turn, budget.turnsUsed, 1_000_000),
 		maxTurns: budget.maxTurns,
 		budget,
-		compaction: state.compaction ?? { consecutiveFailures: 0 },
+		compaction: {
+			consecutiveFailures: boundedNonNegativeInteger(
+				state.compaction?.consecutiveFailures,
+				0,
+				3,
+			),
+		},
 		transition: { reason: "start" },
 	};
+}
+
+function restoredPermissionContext(
+	context: ToolPermissionContext | undefined,
+	messages: readonly Message[],
+): ToolPermissionContext | undefined {
+	if (!isRecord(context)) {
+		return undefined;
+	}
+	const pending = validateRestoredPendingToolApproval(
+		context.pendingToolApproval,
+	);
+	if (pending && !hasRestoredToolBatch(messages, pending.calls)) {
+		throw new Error("pending tool approval has no matching assistant batch");
+	}
+	const completedCallIds = pending
+		? completedPendingToolCallIds(messages, pending.calls)
+		: new Set<string>();
+	const remainingCalls =
+		pending?.calls.filter((call) => !completedCallIds.has(call.id)) ?? [];
+	const remainingCallIds = new Set(remainingCalls.map((call) => call.id));
+	const remainingRequests =
+		pending?.requests.filter((request) =>
+			remainingCallIds.has(request.callId),
+		) ?? [];
+	return {
+		mode: context.mode === "plan" ? "plan" : "normal",
+		agentType: "main",
+		// The trusted caller cwd supplies a fresh workspace-bound default policy.
+		writePolicy: undefined,
+		// Session files live in the writable workspace and cannot grant approval.
+		sessionAllowedTools: [],
+		prePlanMode:
+			context.prePlanMode === "normal" || context.prePlanMode === "plan"
+				? context.prePlanMode
+				: undefined,
+		pendingPlanApproval: normalizeRestoredPendingPlanApproval(
+			context.pendingPlanApproval,
+		),
+		pendingToolApproval:
+			pending && remainingCalls.length > 0
+				? {
+						calls: remainingCalls.map((call) => ({ ...call })),
+						requests: remainingRequests.map((request) => ({
+							...request,
+							args: { ...request.args },
+						})),
+						needsRevalidation: true,
+					}
+				: undefined,
+	};
+}
+
+function persistableToolPermissionContext(
+	context: ToolPermissionContext,
+): ToolPermissionContext {
+	const pending = context.pendingToolApproval;
+	return {
+		...context,
+		// These grants are process-local and must not become durable authority.
+		sessionAllowedTools: [],
+		pendingToolApproval: pending
+			? {
+					calls: pending.calls.map((call) => ({ ...call })),
+					requests: pending.requests.map((request) => ({
+						...request,
+						args: { ...request.args },
+					})),
+				}
+			: undefined,
+	};
+}
+
+function validateRestoredMessages(value: unknown): Message[] {
+	if (value === undefined) {
+		return [];
+	}
+	if (!Array.isArray(value)) {
+		throw new Error("invalid session messages");
+	}
+	return value.map((entry, index) => {
+		if (!isRecord(entry) || typeof entry.content !== "string") {
+			throw new Error(`invalid session message at index ${index}`);
+		}
+		const untrusted = entry.containsUntrustedAgentContent === true;
+		if (entry.role === "system") {
+			return {
+				role: "agent",
+				content: `[restored-session:untrusted-system-message]\n${entry.content}`,
+				containsUntrustedAgentContent: true,
+			};
+		}
+		if (entry.role === "agent") {
+			return {
+				role: "agent",
+				content: entry.content,
+				containsUntrustedAgentContent: true,
+			};
+		}
+		if (entry.role === "assistant") {
+			const toolCalls = validateRestoredToolCalls(
+				entry.toolCalls,
+				`message ${index}`,
+			);
+			return {
+				role: "assistant",
+				content: entry.content,
+				...(toolCalls === undefined ? {} : { toolCalls }),
+				...(untrusted ? { containsUntrustedAgentContent: true } : {}),
+			};
+		}
+		if (entry.role === "tool") {
+			if (
+				typeof entry.toolCallId !== "string" ||
+				entry.toolCallId.trim().length === 0
+			) {
+				throw new Error(`invalid tool result at message ${index}`);
+			}
+			return {
+				role: "tool",
+				content: entry.content,
+				toolCallId: entry.toolCallId,
+				...(untrusted ? { containsUntrustedAgentContent: true } : {}),
+			};
+		}
+		if (entry.role === "user") {
+			return {
+				role: "user",
+				content: entry.content,
+				...(untrusted ? { containsUntrustedAgentContent: true } : {}),
+			};
+		}
+		throw new Error(`invalid session message role at index ${index}`);
+	});
+}
+
+function validateRestoredToolCalls(
+	value: unknown,
+	label: string,
+): Message["toolCalls"] {
+	if (value === undefined) {
+		return undefined;
+	}
+	if (!Array.isArray(value)) {
+		throw new Error(`invalid tool calls in ${label}`);
+	}
+	const ids = new Set<string>();
+	return value.map((entry, index) => {
+		if (
+			!isRecord(entry) ||
+			typeof entry.id !== "string" ||
+			entry.id.trim().length === 0 ||
+			typeof entry.name !== "string" ||
+			entry.name.trim().length === 0 ||
+			typeof entry.arguments !== "string"
+		) {
+			throw new Error(`invalid tool call ${index} in ${label}`);
+		}
+		if (ids.has(entry.id)) {
+			throw new Error(`duplicate tool call id in ${label}: ${entry.id}`);
+		}
+		ids.add(entry.id);
+		return {
+			id: entry.id,
+			name: entry.name,
+			arguments: entry.arguments,
+		};
+	});
+}
+
+function validateRestoredPendingToolApproval(
+	value: unknown,
+): PendingToolApproval | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	if (
+		!isRecord(value) ||
+		!Array.isArray(value.calls) ||
+		!Array.isArray(value.requests)
+	) {
+		throw new Error("invalid pending tool approval in session");
+	}
+	const calls = validateRestoredToolCalls(value.calls, "pending tool approval");
+	if (!calls || calls.length === 0) {
+		throw new Error("pending tool approval has no calls");
+	}
+	const callsById = new Map(calls.map((call) => [call.id, call]));
+	const requestIds = new Set<string>();
+	const requests = value.requests.map((entry, index) => {
+		if (
+			!isRecord(entry) ||
+			typeof entry.callId !== "string" ||
+			entry.callId.trim().length === 0 ||
+			typeof entry.toolName !== "string" ||
+			entry.toolName.trim().length === 0 ||
+			!isRecord(entry.args) ||
+			typeof entry.argumentFingerprint !== "string" ||
+			typeof entry.reason !== "string"
+		) {
+			throw new Error(`invalid pending tool request at index ${index}`);
+		}
+		const call = callsById.get(entry.callId);
+		if (!call || call.name !== entry.toolName || requestIds.has(entry.callId)) {
+			throw new Error(`unmatched pending tool request: ${entry.callId}`);
+		}
+		if (entry.argumentFingerprint !== stableStringify(entry.args)) {
+			throw new Error(`invalid pending tool fingerprint: ${entry.callId}`);
+		}
+		requestIds.add(entry.callId);
+		return {
+			callId: entry.callId,
+			toolName: entry.toolName,
+			args: { ...entry.args },
+			argumentFingerprint: entry.argumentFingerprint,
+			reason: restoredToolApprovalReason(entry.toolName),
+		};
+	});
+	return { calls, requests };
+}
+
+function restoredToolApprovalReason(toolName: string): string {
+	if (toolName === "Shell") {
+		return "executes a PowerShell command that can read host-user files, write in the workspace, and use inherited network access";
+	}
+	if (toolName.startsWith("mcp__")) {
+		return "calls an external MCP tool whose side effects are not controlled by the workspace sandbox";
+	}
+	return `${toolName} modifies files in the workspace`;
+}
+
+function hasRestoredToolBatch(
+	messages: readonly Message[],
+	calls: NonNullable<Message["toolCalls"]>,
+): boolean {
+	return messages.some(
+		(message) =>
+			message.role === "assistant" &&
+			message.toolCalls?.length === calls.length &&
+			message.toolCalls.every(
+				(call, index) =>
+					call.id === calls[index]?.id &&
+					call.name === calls[index]?.name &&
+					call.arguments === calls[index]?.arguments,
+			),
+	);
+}
+
+function normalizeRestoredPendingPlanApproval(
+	value: unknown,
+): ToolPermissionContext["pendingPlanApproval"] {
+	if (value === undefined) {
+		return undefined;
+	}
+	if (!isRecord(value) || typeof value.plan !== "string") {
+		throw new Error("invalid pending plan approval in session");
+	}
+	return {
+		plan: value.plan,
+		runtimePlan: normalizeRestoredPlan(value.runtimePlan),
+	};
+}
+
+function normalizeRestoredPlan(value: unknown): RuntimePlan {
+	if (value === undefined) {
+		return { items: [] };
+	}
+	if (!isRecord(value) || !Array.isArray(value.items)) {
+		throw new Error("invalid runtime plan in session");
+	}
+	if (value.items.length > 1_000) {
+		throw new Error("runtime plan is too large");
+	}
+	const items = value.items.map((entry, index) => {
+		if (
+			!isRecord(entry) ||
+			typeof entry.step !== "string" ||
+			entry.step.trim().length === 0 ||
+			!(["pending", "in_progress", "completed"] as unknown[]).includes(
+				entry.status,
+			)
+		) {
+			throw new Error(`invalid runtime plan item at index ${index}`);
+		}
+		return {
+			step: entry.step,
+			status: entry.status as "pending" | "in_progress" | "completed",
+		};
+	});
+	return {
+		explanation:
+			typeof value.explanation === "string" ? value.explanation : undefined,
+		items,
+	};
+}
+
+function normalizeRestoredBudget(value: unknown): BudgetState {
+	if (!isRecord(value)) {
+		return { turnsUsed: 0, maxTurns: 20 };
+	}
+	const maxTurns = boundedPositiveInteger(value.maxTurns, 20, 100);
+	return {
+		turnsUsed: boundedNonNegativeInteger(value.turnsUsed, 0, maxTurns),
+		maxTurns,
+	};
+}
+
+function boundedPositiveInteger(
+	value: unknown,
+	fallback: number,
+	maximum: number,
+): number {
+	return Number.isSafeInteger(value) && Number(value) > 0
+		? Math.min(Number(value), maximum)
+		: fallback;
+}
+
+function boundedNonNegativeInteger(
+	value: unknown,
+	fallback: number,
+	maximum: number,
+): number {
+	return Number.isSafeInteger(value) && Number(value) >= 0
+		? Math.min(Number(value), maximum)
+		: fallback;
+}
+
+function stableStringify(value: unknown): string {
+	if (Array.isArray(value)) {
+		return `[${value.map(stableStringify).join(",")}]`;
+	}
+	if (isRecord(value)) {
+		return `{${Object.entries(value)
+			.sort(([left], [right]) => left.localeCompare(right))
+			.map(([key, entry]) => `${JSON.stringify(key)}:${stableStringify(entry)}`)
+			.join(",")}}`;
+	}
+	return JSON.stringify(value) ?? "undefined";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 async function pathExists(path: string): Promise<boolean> {

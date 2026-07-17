@@ -1,5 +1,7 @@
+import { resolve } from "node:path";
 import { glob } from "glob";
 import { z } from "zod";
+import { isSafeWorkspaceReadPath } from "./permissions";
 import { fileResourceAccesses, resolveToolPath } from "./resourceLock";
 import type { Tool } from "./types";
 
@@ -27,8 +29,21 @@ export const globTool: Tool<Input, Output> = {
 		input.path = resolveToolPath(cwd, input.path ?? ".");
 		return fileResourceAccesses(input.path, "read", "subtree");
 	},
-	async call({ pattern, path }) {
-		const filenames = await glob(pattern, { cwd: path ?? process.cwd() });
+	async call({ pattern, path }, context) {
+		const cwd = path ?? process.cwd();
+		const state = context?.getState();
+		const workspaceRoot = state?.cwd ?? cwd;
+		const discovered = await glob(pattern, { cwd });
+		const safe = await Promise.all(
+			discovered.map((filename) =>
+				isSafeWorkspaceReadPath(
+					workspaceRoot,
+					resolve(cwd, filename),
+					state?.toolPermissionContext.agentType,
+				),
+			),
+		);
+		const filenames = discovered.filter((_filename, index) => safe[index]);
 		return { filenames };
 	},
 };

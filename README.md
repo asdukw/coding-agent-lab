@@ -26,6 +26,18 @@ To run:
 bun run start
 ```
 
+## 项目上下文与工具审批
+
+每次 query 会加载 workspace 到当前目录之间的项目指令。同一目录优先使用 `AGENTS.md`，仅在其不存在时读取 `CLAUDE.md`；更深目录的指令优先级更高。指令只作为模型 system context 注入，不写入会话消息，并受单文件与总字节上限约束。符号链接、junction/reparse point 或越界路径会被拒绝。
+
+主 Agent 在 normal mode 调用 `Write`、`Edit`、`Shell` 或 MCP 工具前会暂停整批 tool calls，并显示工具名、参数摘要和风险原因：
+
+- 输入 `allow`：只批准当前批次。
+- 输入 `always`：在当前进程会话内持续批准这些工具名；该授权不会随 `/resume` 恢复。
+- 输入 `deny`：不执行被拒绝的危险调用，并向模型返回协议完整的错误 tool result。
+
+`Read`、`Glob`、`Grep`、`Write` 和 `Edit` 始终受 workspace 规范路径检查约束，不能访问 `.env*`、`.git`、`.cagent-sandbox` 或 `.cagent` 控制数据（受验证的 `.cagent/memory` 路径除外）。交互批准不能覆盖这些静态边界。`Shell` 与 MCP 属于不透明工具，其额外边界见下方 sandbox 说明。
+
 ## Windows 原生 Sandbox（M1）
 
 Windows 上的 Shell 工具使用独立 Rust runner 创建受限进程。首次使用前构建 runner：
