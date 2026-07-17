@@ -25,6 +25,7 @@ import {
 } from "../state";
 import { BUILTIN_TOOLS } from "../tools";
 import { type Tools, toToolSpecs } from "../tools/types";
+import { type AppLifecycle, createAppLifecycle } from "./appLifecycle";
 import { parseLocalCommand } from "./localCommands";
 import { Markdown } from "./Markdown";
 
@@ -35,6 +36,7 @@ export type AppProps = {
 	initialState?: AgentState;
 	mcpTools?: Tools;
 	enableMemoryExtraction?: boolean;
+	lifecycle?: AppLifecycle;
 };
 
 const EMPTY_TOOLS: Tools = [];
@@ -83,7 +85,10 @@ export function App({
 	initialState: restoredState,
 	mcpTools = EMPTY_TOOLS,
 	enableMemoryExtraction = true,
+	lifecycle,
 }: AppProps) {
+	const fallbackLifecycle = useMemo(() => createAppLifecycle(), []);
+	const appLifecycle = lifecycle ?? fallbackLifecycle;
 	const tools = useMemo(() => [...BUILTIN_TOOLS, ...mcpTools], [mcpTools]);
 	const agentRuntime = useMemo(
 		() =>
@@ -113,7 +118,7 @@ export function App({
 			userText: string,
 			persistFromMessageIndex: number,
 		) => {
-			if (runInFlightRef.current) {
+			if (runInFlightRef.current || appLifecycle.isClosing) {
 				return;
 			}
 
@@ -125,7 +130,7 @@ export function App({
 			let assistantText = "";
 			let latestState = initialState;
 
-			void (async () => {
+			const runPromise = (async () => {
 				try {
 					await ensureSessionStarted(cwd, initialState);
 					for (const message of initialState.messages.slice(
@@ -141,12 +146,17 @@ export function App({
 						tools,
 						agentRuntime,
 						enableMemoryExtraction,
+						signal: appLifecycle.signal,
 					})) {
 						if (event.type === "request_start") {
-							setModelName(event.model);
+							if (!appLifecycle.isClosing) {
+								setModelName(event.model);
+							}
 						} else if (event.type === "stream_delta") {
 							assistantText += event.content;
-							setStreamingText(assistantText);
+							if (!appLifecycle.isClosing) {
+								setStreamingText(assistantText);
+							}
 						} else if (event.type === "message") {
 							await appendSessionMessage(cwd, initialState, event.message);
 						} else if (event.type === "state") {
@@ -157,9 +167,13 @@ export function App({
 							latestState = event.state;
 							await appendSessionCompaction(cwd, event.state);
 						} else if (event.type === "memory_extraction_request") {
-							void runMemoryExtractionSubAgent({
+							if (appLifecycle.isClosing) {
+								continue;
+							}
+							const extractionTask = runMemoryExtractionSubAgent({
 								state: event.state,
 								model,
+								signal: appLifecycle.signal,
 							})
 								.catch((caught) => ({
 									subAgentSessionId: `${event.state.sessionId}.memory.${event.state.turn}`,
@@ -176,40 +190,48 @@ export function App({
 										`memory extraction audit persistence failed: ${formatCaught(caught)}\n`,
 									);
 								});
+							appLifecycle.track(extractionTask);
 						} else if (event.type === "terminal") {
 							latestState = event.terminal.state;
 							if (!statePersisted) {
 								await appendSessionState(cwd, event.terminal.state);
 							}
-							setAgentState(event.terminal.state);
-							setHistory((current) => [
-								...current,
-								{
-									id: `${event.terminal.state.sessionId}:${event.terminal.state.turn}`,
-									user: userText,
-									assistant: assistantText,
-								},
-							]);
-							setStreamingText("");
+							if (!appLifecycle.isClosing) {
+								setAgentState(event.terminal.state);
+								setHistory((current) => [
+									...current,
+									{
+										id: `${event.terminal.state.sessionId}:${event.terminal.state.turn}`,
+										user: userText,
+										assistant: assistantText,
+									},
+								]);
+								setStreamingText("");
+							}
 						}
 					}
 				} catch (caught) {
-					setAgentState(latestState);
-					setError(caught instanceof Error ? caught.message : String(caught));
-					setStreamingText("");
+					if (!appLifecycle.isClosing) {
+						setAgentState(latestState);
+						setError(caught instanceof Error ? caught.message : String(caught));
+						setStreamingText("");
+					}
 				} finally {
 					runInFlightRef.current = false;
-					setStatus("idle");
+					if (!appLifecycle.isClosing) {
+						setStatus("idle");
+					}
 				}
 			})();
+			appLifecycle.track(runPromise);
 		},
-		[agentRuntime, cwd, enableMemoryExtraction, model, tools],
+		[appLifecycle, agentRuntime, cwd, enableMemoryExtraction, model, tools],
 	);
 
 	const runTurn = useCallback(
 		(text: string) => {
 			const trimmed = text.trim();
-			if (!trimmed || status === "running") {
+			if (!trimmed || status === "running" || appLifecycle.isClosing) {
 				return;
 			}
 			if (
@@ -226,7 +248,7 @@ export function App({
 
 			runState(initialState, trimmed, agentState?.messages.length ?? 0);
 		},
-		[agentState, cwd, runState, status, tools],
+		[agentState, appLifecycle, cwd, runState, status, tools],
 	);
 
 	// biome-ignore lint/correctness/useExhaustiveDependencies: intentionally runs once on mount, not on every task/runTurn change
@@ -239,18 +261,29 @@ export function App({
 	useEffect(
 		() =>
 			agentRuntime.subscribe((event) => {
-				if (event.type === "inbox") {
+				if (event.type === "inbox" && !appLifecycle.isClosing) {
 					setAgentInboxRevision((revision) => revision + 1);
 				}
 			}),
-		[agentRuntime],
+		[agentRuntime, appLifecycle],
 	);
 
 	useEffect(() => {
+		appLifecycle.registerStopProducer(async () => {
+			await agentRuntime.shutdown();
+		});
 		return () => {
-			void agentRuntime.shutdown();
+			if (!appLifecycle.isClosing) {
+				void agentRuntime.shutdown().catch(() => undefined);
+			}
 		};
-	}, [agentRuntime]);
+	}, [agentRuntime, appLifecycle]);
+
+	useEffect(() => {
+		return () => {
+			void appLifecycle.shutdown().catch(() => undefined);
+		};
+	}, [appLifecycle]);
 
 	useEffect(() => {
 		void agentInboxRevision;
@@ -283,6 +316,9 @@ export function App({
 	}, [agentState, runState, status]);
 
 	const handleSubmit = (value: string) => {
+		if (appLifecycle.isClosing) {
+			return;
+		}
 		setInput("");
 		const toolApproval = parseToolApprovalInput(value);
 		if (agentState?.toolPermissionContext.pendingToolApproval) {
@@ -356,36 +392,50 @@ export function App({
 			if (localCommand.type === "resume") {
 				setError(undefined);
 				setStreamingText("");
-				void (async () => {
+				const resumeTask = (async () => {
 					try {
 						const restored = await loadSession(cwd, localCommand.sessionId);
-						setAgentState(restored);
-						setHistory(historyFromState(restored));
+						if (!appLifecycle.isClosing) {
+							setAgentState(restored);
+							setHistory(historyFromState(restored));
+						}
 					} catch (caught) {
-						setError(caught instanceof Error ? caught.message : String(caught));
+						if (!appLifecycle.isClosing) {
+							setError(
+								caught instanceof Error ? caught.message : String(caught),
+							);
+						}
 					}
 				})();
+				appLifecycle.track(resumeTask);
 				return;
 			}
 
 			if (localCommand.type === "memory") {
 				setError(undefined);
 				setStreamingText("");
-				void (async () => {
+				const memoryTask = (async () => {
 					try {
 						const info = await ensureMemoryStore(cwd);
-						setHistory((current) => [
-							...current,
-							{
-								id: `local-${current.length + 1}`,
-								user: "/memory",
-								assistant: formatMemoryStoreSummary(info),
-							},
-						]);
+						if (!appLifecycle.isClosing) {
+							setHistory((current) => [
+								...current,
+								{
+									id: `local-${current.length + 1}`,
+									user: "/memory",
+									assistant: formatMemoryStoreSummary(info),
+								},
+							]);
+						}
 					} catch (caught) {
-						setError(caught instanceof Error ? caught.message : String(caught));
+						if (!appLifecycle.isClosing) {
+							setError(
+								caught instanceof Error ? caught.message : String(caught),
+							);
+						}
 					}
 				})();
+				appLifecycle.track(memoryTask);
 				return;
 			}
 

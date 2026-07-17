@@ -54,6 +54,7 @@ export type MemoryExtractionResult = {
 export async function runMemoryExtractionSubAgent(params: {
 	state: AgentState;
 	model: ModelClient;
+	signal?: AbortSignal;
 }): Promise<MemoryExtractionResult> {
 	const resolvedCwd = resolve(params.state.cwd);
 	const canonicalCwd = await realpath(resolvedCwd).catch(() => resolvedCwd);
@@ -69,6 +70,7 @@ export async function runMemoryExtractionSubAgent(params: {
 
 	await previous.catch(() => undefined);
 	try {
+		params.signal?.throwIfAborted();
 		return await executeMemoryExtraction(params);
 	} finally {
 		release();
@@ -81,8 +83,9 @@ export async function runMemoryExtractionSubAgent(params: {
 async function executeMemoryExtraction(params: {
 	state: AgentState;
 	model: ModelClient;
+	signal?: AbortSignal;
 }): Promise<MemoryExtractionResult> {
-	const { state, model } = params;
+	const { state, model, signal } = params;
 	const subAgentSessionId = `${state.sessionId}.memory.${state.turn}`;
 
 	let finalAnswer = "";
@@ -92,6 +95,7 @@ async function executeMemoryExtraction(params: {
 	let baselineValidationIssues: { path: string; message: string }[] = [];
 	const streamedToolErrors: string[] = [];
 	try {
+		signal?.throwIfAborted();
 		const memoryStore = await ensureMemoryStore(state.cwd);
 		const existingMemoryContext = await buildExistingMemoryContext(memoryStore);
 		baselineValidationIssues = await validateMemoryStore(state.cwd);
@@ -129,6 +133,7 @@ async function executeMemoryExtraction(params: {
 			model,
 			tools: MEMORY_EXTRACTION_TOOLS,
 			enableMemoryExtraction: false,
+			signal,
 		})) {
 			if (event.type === "terminal") {
 				terminal = event.terminal;

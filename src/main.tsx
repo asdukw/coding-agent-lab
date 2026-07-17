@@ -4,6 +4,7 @@ import { createModelClientFromEnv } from "./model";
 import { initializeWindowsSandbox } from "./sandbox";
 import { loadSession } from "./sessionStore";
 import { App } from "./ui/App";
+import { createAppLifecycle } from "./ui/appLifecycle";
 
 export type CliArgs = {
 	task?: string;
@@ -51,15 +52,23 @@ async function main(): Promise<void> {
 		process.stderr.write(`${diagnostic}\n`);
 	}
 
-	render(
-		<App
-			task={task}
-			cwd={cwd}
-			model={model}
-			initialState={initialState}
-			mcpTools={mcp.tools}
-		/>,
-	);
+	const lifecycle = createAppLifecycle();
+	lifecycle.registerStopProducer(() => mcp.close());
+	try {
+		const app = render(
+			<App
+				task={task}
+				cwd={cwd}
+				model={model}
+				initialState={initialState}
+				mcpTools={mcp.tools}
+				lifecycle={lifecycle}
+			/>,
+		);
+		await app.waitUntilExit();
+	} finally {
+		await lifecycle.shutdown();
+	}
 }
 
 if (import.meta.main) {

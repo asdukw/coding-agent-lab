@@ -1,5 +1,5 @@
 import { expect, setDefaultTimeout, test } from "bun:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { render } from "ink-testing-library";
@@ -17,6 +17,7 @@ import {
 	UPDATE_PLAN_TOOL_NAME,
 } from "../src/tools/planToolNames";
 import { App } from "../src/ui/App";
+import { type AppLifecycle, createAppLifecycle } from "../src/ui/appLifecycle";
 
 const APP_WAIT_TIMEOUT_MS = 10_000;
 
@@ -35,11 +36,27 @@ async function removeTempDir(path: string): Promise<void> {
 	});
 }
 
+async function cleanupApp(
+	unmount: () => void,
+	lifecycle: AppLifecycle,
+	cwd: string,
+): Promise<void> {
+	unmount();
+	await lifecycle.shutdown();
+	await removeTempDir(cwd);
+}
+
 test("interactive dialog box drives a multi-turn conversation", async () => {
 	const cwd = await makeTempDir();
 	const model = new StubModelClient();
+	const lifecycle = createAppLifecycle();
 	const { lastFrame, stdin, unmount } = render(
-		<App cwd={cwd} model={model} enableMemoryExtraction={false} />,
+		<App
+			cwd={cwd}
+			model={model}
+			enableMemoryExtraction={false}
+			lifecycle={lifecycle}
+		/>,
 	);
 
 	try {
@@ -84,8 +101,7 @@ test("interactive dialog box drives a multi-turn conversation", async () => {
 		expect(frame).toContain("second message");
 		expect(frame).toContain("Stub agent received task: second message");
 	} finally {
-		unmount();
-		await removeTempDir(cwd);
+		await cleanupApp(unmount, lifecycle, cwd);
 	}
 });
 
@@ -107,8 +123,14 @@ test("resume slash command restores a saved session", async () => {
 	};
 	await saveSession(cwd, state);
 
+	const lifecycle = createAppLifecycle();
 	const { lastFrame, stdin, unmount } = render(
-		<App cwd={cwd} model={model} enableMemoryExtraction={false} />,
+		<App
+			cwd={cwd}
+			model={model}
+			enableMemoryExtraction={false}
+			lifecycle={lifecycle}
+		/>,
 	);
 
 	try {
@@ -127,8 +149,7 @@ test("resume slash command restores a saved session", async () => {
 		expect(frame).toContain("old task");
 		expect(frame).toContain("old answer");
 	} finally {
-		unmount();
-		await removeTempDir(cwd);
+		await cleanupApp(unmount, lifecycle, cwd);
 	}
 });
 
@@ -145,8 +166,14 @@ class FailingModelClient implements ModelClient {
 test("/plan enters plan mode locally without calling the model", async () => {
 	const cwd = await makeTempDir();
 	const model = new FailingModelClient();
+	const lifecycle = createAppLifecycle();
 	const { lastFrame, stdin, unmount } = render(
-		<App cwd={cwd} model={model} enableMemoryExtraction={false} />,
+		<App
+			cwd={cwd}
+			model={model}
+			enableMemoryExtraction={false}
+			lifecycle={lifecycle}
+		/>,
 	);
 
 	try {
@@ -167,16 +194,21 @@ test("/plan enters plan mode locally without calling the model", async () => {
 		expect(frame).toContain("runtime state only");
 		expect(model.called).toBe(false);
 	} finally {
-		unmount();
-		await removeTempDir(cwd);
+		await cleanupApp(unmount, lifecycle, cwd);
 	}
 });
 
 test("/memory initializes the memory store locally without calling the model", async () => {
 	const cwd = await makeTempDir();
 	const model = new FailingModelClient();
+	const lifecycle = createAppLifecycle();
 	const { lastFrame, stdin, unmount } = render(
-		<App cwd={cwd} model={model} enableMemoryExtraction={false} />,
+		<App
+			cwd={cwd}
+			model={model}
+			enableMemoryExtraction={false}
+			lifecycle={lifecycle}
+		/>,
 	);
 
 	try {
@@ -200,8 +232,7 @@ test("/memory initializes the memory store locally without calling the model", a
 			await readFile(join(cwd, ".cagent", "memory", "MEMORY.md"), "utf-8"),
 		).toBe("# Memory\n\n");
 	} finally {
-		unmount();
-		await removeTempDir(cwd);
+		await cleanupApp(unmount, lifecycle, cwd);
 	}
 });
 
@@ -248,8 +279,14 @@ class PlanApprovalModelClient implements ModelClient {
 test("plan approval prompt continues after approve", async () => {
 	const cwd = await makeTempDir();
 	const model = new PlanApprovalModelClient();
+	const lifecycle = createAppLifecycle();
 	const { lastFrame, stdin, unmount } = render(
-		<App cwd={cwd} model={model} enableMemoryExtraction={false} />,
+		<App
+			cwd={cwd}
+			model={model}
+			enableMemoryExtraction={false}
+			lifecycle={lifecycle}
+		/>,
 	);
 
 	try {
@@ -286,8 +323,7 @@ test("plan approval prompt continues after approve", async () => {
 		expect(frame).toContain("approve plan");
 		expect(frame).toContain("implementation started");
 	} finally {
-		unmount();
-		await removeTempDir(cwd);
+		await cleanupApp(unmount, lifecycle, cwd);
 	}
 });
 
@@ -319,8 +355,14 @@ test("tool approval prompt resumes the original call after allow", async () => {
 	const cwd = await makeTempDir();
 	const filePath = join(cwd, "approved.txt");
 	const model = new ToolApprovalModelClient(filePath);
+	const lifecycle = createAppLifecycle();
 	const { lastFrame, stdin, unmount } = render(
-		<App cwd={cwd} model={model} enableMemoryExtraction={false} />,
+		<App
+			cwd={cwd}
+			model={model}
+			enableMemoryExtraction={false}
+			lifecycle={lifecycle}
+		/>,
 	);
 
 	try {
@@ -352,8 +394,7 @@ test("tool approval prompt resumes the original call after allow", async () => {
 		expect(frame).not.toContain("tool approval");
 		expect(await readFile(filePath, "utf8")).toBe("approved content");
 	} finally {
-		unmount();
-		await removeTempDir(cwd);
+		await cleanupApp(unmount, lifecycle, cwd);
 	}
 });
 
@@ -415,8 +456,14 @@ class BackgroundAgentModelClient implements ModelClient {
 test("background completion wakes an idle main agent exactly once", async () => {
 	const cwd = await makeTempDir();
 	const model = new BackgroundAgentModelClient();
+	const lifecycle = createAppLifecycle();
 	const { lastFrame, stdin, unmount } = render(
-		<App cwd={cwd} model={model} enableMemoryExtraction={false} />,
+		<App
+			cwd={cwd}
+			model={model}
+			enableMemoryExtraction={false}
+			lifecycle={lifecycle}
+		/>,
 	);
 
 	try {
@@ -449,7 +496,164 @@ test("background completion wakes an idle main agent exactly once", async () => 
 			"child investigation complete",
 		);
 	} finally {
-		unmount();
+		await cleanupApp(unmount, lifecycle, cwd);
+	}
+});
+
+class AbortAwareModelClient implements ModelClient {
+	readonly name = "abort-aware";
+	readonly entered = deferredSignal();
+	aborted = false;
+
+	async *stream(request: ModelRequest): AsyncGenerator<ModelStreamEvent> {
+		this.entered.resolve();
+		await new Promise<void>((_resolve, reject) => {
+			const abort = () => {
+				this.aborted = true;
+				reject(new Error("foreground model aborted"));
+			};
+			if (request.signal?.aborted) {
+				abort();
+				return;
+			}
+			request.signal?.addEventListener("abort", abort, { once: true });
+		});
+	}
+}
+
+test("shutdown aborts and drains an active foreground run", async () => {
+	const cwd = await makeTempDir();
+	const model = new AbortAwareModelClient();
+	const lifecycle = createAppLifecycle();
+	const { lastFrame, stdin, unmount } = render(
+		<App
+			cwd={cwd}
+			model={model}
+			enableMemoryExtraction={false}
+			lifecycle={lifecycle}
+		/>,
+	);
+	let unmounted = false;
+	const unmountOnce = () => {
+		if (!unmounted) {
+			unmounted = true;
+			unmount();
+		}
+	};
+
+	try {
+		await waitForInputReady(lastFrame, "Type a message and press Enter...");
+		stdin.write("block foreground");
+		await waitForInputValue(
+			lastFrame,
+			"block foreground",
+			"Type a message and press Enter...",
+		);
+		stdin.write("\r");
+		await waitForSignal(
+			model.entered.promise,
+			lastFrame,
+			"model did not start",
+		);
+
+		unmountOnce();
+		await lifecycle.shutdown();
+		expect(model.aborted).toBe(true);
+	} finally {
+		unmountOnce();
+		await lifecycle.shutdown();
+		await removeTempDir(cwd);
+	}
+});
+
+class BlockingMemoryExtractionModelClient implements ModelClient {
+	readonly name = "blocking-memory-extraction";
+	readonly extractionEntered = deferredSignal();
+	readonly releaseExtraction = deferredSignal();
+
+	async *stream(request: ModelRequest): AsyncGenerator<ModelStreamEvent> {
+		if (
+			request.messages.some(
+				(message) =>
+					message.role === "user" &&
+					message.content.includes("memory extraction sub-agent"),
+			)
+		) {
+			this.extractionEntered.resolve();
+			await this.releaseExtraction.promise;
+			yield { type: "text_delta", content: "NO_MEMORY" };
+			return;
+		}
+
+		yield { type: "text_delta", content: "main turn complete" };
+	}
+}
+
+test("shutdown waits for memory extraction and audit persistence", async () => {
+	const cwd = await makeTempDir();
+	const model = new BlockingMemoryExtractionModelClient();
+	const lifecycle = createAppLifecycle();
+	const { lastFrame, stdin, unmount } = render(
+		<App cwd={cwd} model={model} lifecycle={lifecycle} />,
+	);
+	let unmounted = false;
+	const unmountOnce = () => {
+		if (!unmounted) {
+			unmounted = true;
+			unmount();
+		}
+	};
+
+	try {
+		await waitForInputReady(lastFrame, "Type a message and press Enter...");
+		stdin.write("remember this preference");
+		await waitForInputValue(
+			lastFrame,
+			"remember this preference",
+			"Type a message and press Enter...",
+		);
+		stdin.write("\r");
+		await waitForSignal(
+			model.extractionEntered.promise,
+			lastFrame,
+			"memory extraction did not start",
+		);
+		await waitForFrame(lastFrame, [
+			"main turn complete",
+			"Type a message and press Enter...",
+		]);
+
+		unmountOnce();
+		const shutdown = lifecycle.shutdown();
+		let shutdownSettled = false;
+		void shutdown.then(
+			() => {
+				shutdownSettled = true;
+			},
+			() => {
+				shutdownSettled = true;
+			},
+		);
+		await nextEventLoopTurn();
+		expect(shutdownSettled).toBe(false);
+
+		model.releaseExtraction.resolve();
+		await shutdown;
+		expect(shutdownSettled).toBe(true);
+
+		const sessionsDir = join(cwd, ".cagent", "sessions");
+		const sessionFiles = (await readdir(sessionsDir)).filter(
+			(filename) =>
+				filename.endsWith(".jsonl") && filename !== "session_index.jsonl",
+		);
+		expect(sessionFiles).toHaveLength(1);
+		expect(
+			await readFile(join(sessionsDir, sessionFiles[0] ?? "missing"), "utf8"),
+		).toContain('"type":"memory_extraction"');
+	} finally {
+		model.releaseExtraction.resolve();
+		unmountOnce();
+		await lifecycle.shutdown();
 		await removeTempDir(cwd);
 	}
 });
