@@ -91,6 +91,14 @@ foreach ($entry in $visualStudioEnvironment) {
 	$value = $entry.Substring($separator + 1)
 	[System.Environment]::SetEnvironmentVariable($name, $value, "Process")
 }
+$vcToolsInstallDir = [System.Environment]::GetEnvironmentVariable("VCToolsInstallDir", "Process")
+if ([string]::IsNullOrWhiteSpace($vcToolsInstallDir)) {
+	throw "Visual Studio did not provide VCToolsInstallDir."
+}
+$msvcLinkerPath = Join-Path $vcToolsInstallDir "bin\HostX64\x64\link.exe"
+if (-not (Test-Path -LiteralPath $msvcLinkerPath -PathType Leaf)) {
+	throw "The Visual Studio x64 linker was not found: $msvcLinkerPath"
+}
 
 # Cargo resolves its compiler child through configuration and PATH. A separate
 # Chocolatey/MSYS Rust or wrapper can otherwise mix a GNU compiler with the
@@ -126,6 +134,8 @@ foreach ($name in @(
 $env:RUSTC = $rustcPath
 $env:RUSTDOC = $rustdocPath
 $env:RUSTUP_TOOLCHAIN = $toolchain
+# Hosted runners and developer machines may also expose a GNU link.exe.
+$env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER = $msvcLinkerPath
 $env:Path = "$toolchainBin;$env:Path"
 
 New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
