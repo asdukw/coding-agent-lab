@@ -235,6 +235,26 @@ test("loadSession rejects semantically invalid complete JSONL records", async ()
 				},
 			}),
 		},
+		{
+			name: "invalid permission mode",
+			expected: "state_snapshot payload toolPermissionContext.mode is invalid",
+			createEvent: (_sessionId, _timestamp, snapshot) => {
+				const snapshotPayload = snapshot.payload as Record<string, unknown>;
+				return {
+					...snapshot,
+					payload: {
+						...snapshotPayload,
+						toolPermissionContext: {
+							...(snapshotPayload.toolPermissionContext as Record<
+								string,
+								unknown
+							>),
+							mode: "bypass",
+						},
+					},
+				};
+			},
+		},
 	];
 
 	for (const [index, scenario] of scenarios.entries()) {

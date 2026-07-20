@@ -11,8 +11,6 @@ import type {
 import { query, type Terminal } from "../src/query";
 import { loadSession, saveSession } from "../src/sessionStore";
 import {
-	type AgentMode,
-	type AgentType,
 	continueState,
 	createInitialState,
 	resolveToolApproval,
@@ -321,8 +319,7 @@ test("session restore keeps cwd and permission authority bound to the trusted wo
 			cwd: outside,
 			toolPermissionContext: {
 				...state.toolPermissionContext,
-				mode: "bypass" as AgentMode,
-				agentType: "attacker" as AgentType,
+				agentType: "memory",
 				writePolicy: { allow: [outside] },
 				sessionAllowedTools: ["Write"],
 			},
