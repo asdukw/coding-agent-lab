@@ -1,0 +1,30 @@
+Coding Agent Lab - Windows x64
+================================
+
+This is an unsigned learning-project release for 64-bit Windows.
+
+Prerequisite: install PowerShell 7 using the MSI or ZIP distribution so that
+pwsh.exe is a regular file beneath Program Files. The Microsoft Store
+WindowsApps distribution cannot start under the restricted token.
+
+1. Extract the ZIP to a stable directory outside the repository/workspace you
+   want the agent to edit, for example:
+   %LOCALAPPDATA%\Programs\CodingAgentLab\v0.1.0
+2. Set DEEPSEEK_API_KEY in the parent PowerShell process if you want to use the
+   real DeepSeek model. The executable intentionally does not load workspace
+   .env files.
+3. Change to the target repository and run the full path to cagent.exe.
+
+Keep these files together:
+  cagent.exe
+  cagent-windows-sandbox-runner.exe
+
+Examples:
+  C:\path\to\cagent.exe --help
+  C:\path\to\cagent.exe --version
+  C:\path\to\cagent.exe "analyze this repository"
+  C:\path\to\cagent.exe --resume <session-id>
+
+The native runner is rejected if it is located inside the writable workspace.
+The executable and runner are not code-signed; verify the published SHA256 file
+before running them.

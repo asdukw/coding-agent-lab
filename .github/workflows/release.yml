@@ -1,0 +1,105 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CI: "true"
+  RUST_TOOLCHAIN: 1.96.0-x86_64-pc-windows-msvc
+
+jobs:
+  windows-x64:
+    name: Build and publish Windows x64
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Validate tag and release metadata
+        run: |
+          $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($env:GITHUB_REF_NAME -notmatch '^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
+            throw "Release tag must be v followed by a semantic version."
+          }
+          if ($packageVersion -ne $version) {
+            throw "Tag version $version does not match package.json $packageVersion."
+          }
+          $notes = "docs/releases/$($env:GITHUB_REF_NAME).md"
+          if (-not (Test-Path -LiteralPath $notes -PathType Leaf)) {
+            throw "Release notes are missing: $notes"
+          }
+          "RELEASE_VERSION=$version" >> $env:GITHUB_ENV
+          "RELEASE_NOTES=$notes" >> $env:GITHUB_ENV
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Check TypeScript and style
+        run: |
+          bun run check:style
+          bun run check
+
+      - name: Run offline tests and demo
+        run: |
+          bun run test:unit
+          bun run demo:offline
+
+      - name: Install pinned Rust toolchain
+        run: >-
+          rustup toolchain install $env:RUST_TOOLCHAIN
+          --profile minimal
+          --component rustfmt
+          --component clippy
+          --target x86_64-pc-windows-msvc
+
+      - name: Check and test native runner
+        working-directory: native/windows-sandbox-runner
+        run: |
+          rustup run $env:RUST_TOOLCHAIN cargo fmt --all -- --check
+          rustup run $env:RUST_TOOLCHAIN cargo clippy --locked --all-targets -- -D warnings
+          rustup run $env:RUST_TOOLCHAIN cargo test --locked
+
+      - name: Build release package
+        run: |
+          .\scripts\build-windows-release.ps1 -Version $env:RELEASE_VERSION
+          $artifactName = "coding-agent-lab-v$($env:RELEASE_VERSION)-windows-x64"
+          "RELEASE_ZIP=$($PWD.Path)\dist\release\$artifactName.zip" >> $env:GITHUB_ENV
+          "RELEASE_SHA=$($PWD.Path)\dist\release\$artifactName.zip.sha256" >> $env:GITHUB_ENV
+          "RELEASE_RUNNER=$($PWD.Path)\dist\release\$artifactName\cagent-windows-sandbox-runner.exe" >> $env:GITHUB_ENV
+
+      - name: Smoke-test packaged CLI
+        run: .\scripts\test-windows-release.ps1 -PackagePath $env:RELEASE_ZIP -ExpectedVersion $env:RELEASE_VERSION
+
+      - name: Test packaged sandbox runner end to end
+        env:
+          CAGENT_WINDOWS_SANDBOX_INTEGRATION: "1"
+        run: bun run test:sandbox
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create $env:GITHUB_REF_NAME
+          $env:RELEASE_ZIP
+          $env:RELEASE_SHA
+          --verify-tag
+          --title "Coding Agent Lab $env:GITHUB_REF_NAME"
+          --notes-file $env:RELEASE_NOTES

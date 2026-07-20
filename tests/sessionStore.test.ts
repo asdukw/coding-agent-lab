@@ -908,4 +908,19 @@ test("parseCliArgs supports resume id and preserves task text", () => {
 		resumeId: "session-2",
 		task: undefined,
 	});
+
+	expect(parseCliArgs(["--help"])).toEqual({
+		help: true,
+		resumeId: undefined,
+		task: undefined,
+	});
+	expect(parseCliArgs(["-V"])).toEqual({
+		resumeId: undefined,
+		task: undefined,
+		version: true,
+	});
+	expect(parseCliArgs(["--", "--resume", "literal-task"])).toEqual({
+		resumeId: undefined,
+		task: "--resume literal-task",
+	});
 });

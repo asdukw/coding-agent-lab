@@ -302,11 +302,12 @@ fn canonical_file(path: &Path, label: &str) -> Result<PathBuf, RunError> {
 }
 
 fn trusted_powershell_executable() -> Result<PathBuf, RunError> {
-    let program_files = program_files_directory()?;
+    let program_files = canonical_directory(&program_files_directory()?, "Program Files")?;
+    let windows_apps = program_files.join("WindowsApps");
     let search_path = std::env::var_os("PATH").ok_or_else(|| {
         RunError::at(
             "resolve_executable",
-            "PowerShell 7 cannot be resolved because PATH is missing",
+            "PowerShell cannot be resolved because PATH is missing",
         )
     })?;
     for directory in std::env::split_paths(&search_path) {
@@ -327,13 +328,16 @@ fn trusted_powershell_executable() -> Result<PathBuf, RunError> {
                 error.stage = "resolve_executable".to_owned();
                 error
             })?;
-        if path_is_within(&powershell, &program_files) {
+        if path_is_within(&powershell, &program_files)
+            && !path_is_within(&powershell, &windows_apps)
+        {
             return Ok(powershell);
         }
     }
+
     Err(RunError::at(
         "resolve_executable",
-        "PowerShell 7 (pwsh.exe) was not found as a regular file beneath Program Files on PATH",
+        "PowerShell 7 (pwsh.exe) was not found as a regular file beneath Program Files on PATH; WindowsApps installations are unsupported under the restricted token",
     ))
 }
 

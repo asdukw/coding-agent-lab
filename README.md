@@ -27,7 +27,7 @@ Demo 在临时 workspace 中复用真实 Agent Loop、计划审批、文件工�
   → 保存 Session → load → 继续一次真实 follow-up
 ```
 
-执行完成后会保留脱敏的 JSON 与 Markdown 报告，并打印其临时目录。任一状态转换、工具结果、持久化或恢复断言失败都会写入结构化失败信息并返回非零退出码。CI 会在 Ubuntu 和 Windows 分别执行相同场景，并上传带平台与 run-attempt 标识的 `offline-demo-*` artifact。
+执行完成后，终端仪表盘会直接展示控制流、模型阶段、工具、审批、Session 恢复、验收与安全边界，同时保留脱敏的 JSON 与 Markdown 报告并打印其临时目录。任一状态转换、工具结果、持久化或恢复断言失败都会展示失败阶段、失败检查与报告位置，并返回非零退出码。CI 会在 Ubuntu 和 Windows 分别执行相同场景，并上传带平台与 run-attempt 标识的 `offline-demo-*` artifact。
 
 离线 Demo 为保证跨平台和确定性，显式只注册 Plan、`Read` 与 `Edit` 工具，不暴露 `Shell`；Windows 原生 Sandbox 由独立 Release runner E2E 验证。
 
@@ -58,6 +58,18 @@ bun run demo:deepseek
 | 可恢复的确定性端到端场景 | [`src/demo/offlineDemo.ts`](src/demo/offlineDemo.ts)、[`src/demo/scriptedDemoModel.ts`](src/demo/scriptedDemoModel.ts) | `bun run demo:offline`、[CI artifact](.github/workflows/ci.yml) |
 
 更完整的分层与信任边界见 [`docs/architecture.md`](docs/architecture.md)，关键设计取舍记录在 [`docs/adr/`](docs/adr/)。
+
+## Windows x64 发行版
+
+GitHub Release 提供不依赖本机 Bun、npm link 或 shebang 的 Windows x64 ZIP。下载 ZIP 与同名 `.sha256` 后，先校验 SHA256，再解压到目标仓库之外的稳定目录，例如 `%LOCALAPPDATA%\Programs\CodingAgentLab\v0.1.0`。包内的 `cagent.exe` 与 `cagent-windows-sandbox-runner.exe` 必须保持同目录：
+
+```powershell
+Set-Location C:\path\to\target-repository
+C:\path\to\CodingAgentLab\cagent.exe --version
+C:\path\to\CodingAgentLab\cagent.exe "分析当前仓库"
+```
+
+发行 EXE 支持 `--help`、`--version` 和 `--resume <session-id>`，不会读取目标 workspace 的 `.env`，也不会经过目标 workspace 的 Bun 启动配置。当前二进制未做代码签名，且 runner 若位于可写 workspace 内会被安全策略拒绝。
 
 ## 学习目标
 
@@ -146,7 +158,7 @@ bun install
 
 ### 2. 配置模型
 
-当前真实模型适配器使用 DeepSeek 的 OpenAI-compatible API。常规 `start` / `dev` 入口刻意禁用了 Bun 自动加载 workspace `.env*`，请在启动 Agent 的父进程中设置环境变量：
+当前真实模型适配器使用 DeepSeek 的 OpenAI-compatible API。源码 `start` 入口和 Windows 发行 EXE 不自动加载 workspace `.env*`，请在启动 Agent 的父进程中设置环境变量：
 
 ```powershell
 $env:DEEPSEEK_API_KEY = "your-key"
@@ -154,13 +166,13 @@ $env:DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 $env:DEEPSEEK_MODEL = "deepseek-v4-flash"
 ```
 
-`demo:deepseek` 单独提供了显式 dotenv 加载：它只读取仓库根目录 `.env` 中的 `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL` 和 `DEEPSEEK_MODEL`，而且不会覆盖父进程中已经存在的同名变量。这个受限 allowlist 不会改变 `start` / `dev` 的加载行为，也不会把 `.env` 中的其他变量带入 Agent 进程；请勿提交包含密钥的 `.env`。
+源码 `dev` 为本仓库开发便利而显式使用 `--env-file=.env` 并开启 watch，只应在可信的项目副本中运行。`demo:deepseek` 也提供受限 dotenv 加载：它只读取仓库根目录 `.env` 中的 `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL` 和 `DEEPSEEK_MODEL`，而且不会覆盖父进程中已经存在的同名变量。请勿提交包含密钥的 `.env`。
 
 如果未设置 `DEEPSEEK_API_KEY`，应用会使用确定性的 Stub Model，适合查看 UI、Session 和基础交互，但不会执行真实 Coding Agent 推理。Windows 启动仍会初始化原生 Sandbox，因此即使使用 Stub，也需要先完成下一步的 runner 构建。
 
 ### 3. Windows：构建原生 Sandbox runner
 
-Windows 是当前的主要开发平台。启动 CLI 前需要安装 PowerShell 7、Rustup 与 Visual Studio 2022 C++ Build Tools，并安装固定 Rust 工具链：
+Windows 是当前的主要开发平台。运行内置 `Shell` 需要通过 MSI 或 ZIP 安装在 `Program Files` 的 PowerShell 7；Microsoft Store 的 WindowsApps 版本无法在 Restricted Token 下直接启动，因而会被拒绝。源码构建 runner 还需要 Rustup 与 Visual Studio 2022 C++ Build Tools，并安装固定 Rust 工具链：
 
 ```powershell
 rustup toolchain install 1.96.0-x86_64-pc-windows-msvc --profile minimal
@@ -179,6 +191,8 @@ bun run build:sandbox
 ```
 
 Ubuntu 可以运行控制面和离线测试，但不会注册内置 `Shell` 工具。其他平台尚未作为支持目标验证。
+
+发行 ZIP 已包含 runner，不需要本机 Rust 或 Visual Studio，但仍需要上述标准 PowerShell 7 安装。
 
 ### 4. 启动
 
@@ -260,6 +274,8 @@ bun run test:unit
 bun run test:deepseek
 ```
 
+`test:unit` 自动发现 `tests/**/*.test.ts`，排除需要真实凭据或原生 runner 的专用测试，并让每个测试文件在独立 Bun 进程中运行，避免进程级单例或开放句柄跨文件污染。
+
 ```powershell
 # Windows Release runner 的真实 E2E 由专用 CI 环境显式启用
 $env:CAGENT_WINDOWS_SANDBOX_INTEGRATION = "1"
@@ -273,6 +289,7 @@ GitHub Actions 当前包含：
 - Ubuntu / Windows：离线 Bun 测试。
 - Ubuntu / Windows：确定性离线 Demo 与脱敏报告 artifact。
 - Windows 2022：Rust fmt、Clippy、单元测试、Release 构建与真实 Sandbox E2E。
+- `v*` tag：重新执行完整验证，生成 Windows x64 ZIP 与 SHA256，通过打包后 smoke / Sandbox E2E 后发布 GitHub Release。
 
 `demo:deepseek` 与 `test:deepseek` 需要真实凭据、访问外部 API，且结果可能受模型变化影响，因此不在常规 CI 中执行；其中 `demo:deepseek` 还必须由人在终端显式批准计划与文件修改。
 
@@ -290,7 +307,7 @@ Windows M1 Sandbox 的目标是限制本地文件写入并管理普通子进程�
 - 面对并发恶意宿主进程时的强 TOCTOU 防护。
 - 工作区快照、文件变更回滚或跨进程调度。
 
-此外，当前 `bin/cagent` 是源码开发入口。虽然关闭了 dotenv 自动加载，workspace 的 `bunfig.toml` 仍可能在应用入口与 Sandbox 初始化之前执行 preload，因此它不能作为正式的跨重启安全发行入口。
+`bin/cagent` 仍只是源码开发入口：Bun 在 Windows 上无法把多参数 `env -S` shebang 正确映射为全局 shim，而且 workspace `bunfig.toml` 可能在应用入口与 Sandbox 初始化之前执行 preload。正式运行边界是独立编译的 Windows Release EXE；它不经过 Bun CLI 启动配置，并在临时恶意 workspace 中对 `--help` / `--version` 做打包后 smoke 验证。
 
 完整协议、信任假设与残余风险见 [`native/windows-sandbox-runner/README.md`](native/windows-sandbox-runner/README.md)。
 

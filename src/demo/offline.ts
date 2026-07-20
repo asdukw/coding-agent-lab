@@ -1,10 +1,17 @@
 import { resolve } from "node:path";
+import {
+	formatOfflineCliFailure,
+	formatOfflineDemoFailure,
+	formatOfflineDemoSuccess,
+	shouldUseConsoleColor,
+} from "./offlineConsole";
 import { OfflineDemoFailure, runOfflineDemo } from "./offlineDemo";
 
 const HELP = `Usage: bun run demo:offline [--output-dir <path>]
 
 Runs a deterministic coding-agent scenario in a temporary workspace.
 By default, reports are retained under the operating system's temp directory.
+The terminal summary explains the flow, tools, approvals, Session, and safety checks.
 `;
 
 async function main(): Promise<void> {
@@ -18,16 +25,7 @@ async function main(): Promise<void> {
 		reportDirectory: parsed.reportDirectory,
 	});
 	process.stdout.write(
-		[
-			"Offline demo passed.",
-			`  flow: ${result.report.terminalSequence.join(" -> ")}`,
-			`  tools: ${result.report.toolSequence.join(" -> ")}`,
-			`  changed: ${result.report.changedFiles.join(", ")}`,
-			`  session restores: ${result.report.counts.sessionRestores}`,
-			`  JSON report: ${result.jsonReportPath}`,
-			`  Markdown report: ${result.markdownReportPath}`,
-			"",
-		].join("\n"),
+		formatOfflineDemoSuccess(result, shouldUseConsoleColor(process.stdout)),
 	);
 }
 
@@ -61,22 +59,14 @@ function parseArgs(args: string[]): {
 main().catch((caught) => {
 	if (caught instanceof OfflineDemoFailure) {
 		process.stderr.write(
-			`${JSON.stringify({
-				status: "failed",
-				failure: caught.result.report.failure,
-				jsonReportPath: caught.result.jsonReportPath,
-				markdownReportPath: caught.result.markdownReportPath,
-			})}\n`,
+			formatOfflineDemoFailure(
+				caught.result,
+				shouldUseConsoleColor(process.stderr),
+			),
 		);
 	} else {
 		process.stderr.write(
-			`${JSON.stringify({
-				status: "failed",
-				failure: {
-					stage: "cli",
-					message: caught instanceof Error ? caught.message : String(caught),
-				},
-			})}\n`,
+			formatOfflineCliFailure(caught, shouldUseConsoleColor(process.stderr)),
 		);
 	}
 	process.exitCode = 1;

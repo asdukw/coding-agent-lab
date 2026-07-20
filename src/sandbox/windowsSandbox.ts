@@ -2,7 +2,7 @@ import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import { userInfo } from "node:os";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import {
 	WINDOWS_SANDBOX_NETWORK_NOTICE,
 	WINDOWS_SANDBOX_PROTOCOL_VERSION,
@@ -666,13 +666,14 @@ async function resolveHelperPath(
 		}
 	}
 	throw new WindowsSandboxError(
-		`Native sandbox helper was not found. Run "bun run build:sandbox" first. Checked: ${candidates.join(", ")}`,
+		`Native sandbox helper was not found. Keep the release runner beside cagent.exe, or run "bun run build:sandbox" from the source repository. Checked: ${candidates.join(", ")}`,
 		{ stage: "helper_unavailable" },
 	);
 }
 
 function defaultHelperCandidates(): string[] {
 	return [
+		resolve(dirname(process.execPath), "cagent-windows-sandbox-runner.exe"),
 		resolve(
 			trustedWindowsUserProfile(),
 			"AppData",
