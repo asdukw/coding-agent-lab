@@ -8,6 +8,7 @@ use protocol::MAX_REQUEST_BYTES;
 use protocol::PROTOCOL_VERSION;
 use protocol::SandboxRequest;
 use protocol::SandboxResponse;
+use protocol::SandboxSuccess;
 use std::io::Read;
 
 fn main() {
@@ -38,12 +39,14 @@ fn run() -> SandboxResponse {
         match windows::run(request) {
             Ok(result) => SandboxResponse::success(
                 request_id,
-                result.exit_code,
-                result.stdout,
-                result.stderr,
-                result.timed_out,
-                result.stdout_truncated,
-                result.stderr_truncated,
+                SandboxSuccess {
+                    exit_code: result.exit_code,
+                    stdout: result.stdout,
+                    stderr: result.stderr,
+                    timed_out: result.timed_out,
+                    stdout_truncated: result.stdout_truncated,
+                    stderr_truncated: result.stderr_truncated,
+                },
                 enforcement,
             ),
             Err(error) => SandboxResponse::error_with_enforcement(

@@ -81,9 +81,13 @@ jobs:
         run: |
           .\scripts\build-windows-release.ps1 -Version $env:RELEASE_VERSION
           $artifactName = "coding-agent-lab-v$($env:RELEASE_VERSION)-windows-x64"
+          $releaseRunner = "$($PWD.Path)\dist\release\$artifactName\cagent-windows-sandbox-runner.exe"
+          if (-not (Test-Path -LiteralPath $releaseRunner -PathType Leaf)) {
+            throw "Expected packaged sandbox runner was not produced: $releaseRunner"
+          }
           "RELEASE_ZIP=$($PWD.Path)\dist\release\$artifactName.zip" >> $env:GITHUB_ENV
           "RELEASE_SHA=$($PWD.Path)\dist\release\$artifactName.zip.sha256" >> $env:GITHUB_ENV
-          "RELEASE_RUNNER=$($PWD.Path)\dist\release\$artifactName\cagent-windows-sandbox-runner.exe" >> $env:GITHUB_ENV
+          "CAGENT_WINDOWS_SANDBOX_HELPER=$releaseRunner" >> $env:GITHUB_ENV
 
       - name: Smoke-test packaged CLI
         run: .\scripts\test-windows-release.ps1 -PackagePath $env:RELEASE_ZIP -ExpectedVersion $env:RELEASE_VERSION

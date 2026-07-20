@@ -61,7 +61,7 @@ bun run demo:deepseek
 
 ## Windows x64 发行版
 
-GitHub Release 提供不依赖本机 Bun、npm link 或 shebang 的 Windows x64 ZIP。下载 ZIP 与同名 `.sha256` 后，先校验 SHA256，再解压到目标仓库之外的稳定目录，例如 `%LOCALAPPDATA%\Programs\CodingAgentLab\v0.1.0`。包内的 `cagent.exe` 与 `cagent-windows-sandbox-runner.exe` 必须保持同目录：
+GitHub Release 提供不依赖本机 Bun、npm link 或 shebang 的 Windows x64 ZIP。下载 ZIP 与同名 `.sha256` 后，先校验 SHA256，再解压到目标仓库之外的稳定目录，例如 `%LOCALAPPDATA%\Programs\CodingAgentLab\v0.1.1`。包内的 `cagent.exe` 与 `cagent-windows-sandbox-runner.exe` 必须保持同目录：
 
 ```powershell
 Set-Location C:\path\to\target-repository

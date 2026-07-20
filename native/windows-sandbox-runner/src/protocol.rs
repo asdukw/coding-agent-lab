@@ -68,6 +68,15 @@ pub struct EnforcementSummary {
     pub network: &'static str,
 }
 
+pub struct SandboxSuccess {
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+    pub timed_out: bool,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+}
+
 impl EnforcementSummary {
     pub fn windows_v1() -> Self {
         Self {
@@ -96,23 +105,18 @@ impl EnforcementSummary {
 impl SandboxResponse {
     pub fn success(
         request_id: String,
-        exit_code: i32,
-        stdout: String,
-        stderr: String,
-        timed_out: bool,
-        stdout_truncated: bool,
-        stderr_truncated: bool,
+        output: SandboxSuccess,
         enforcement: EnforcementSummary,
     ) -> Self {
         Self {
             status: ResponseStatus::Ok,
             request_id,
-            exit_code: Some(exit_code),
-            stdout,
-            stderr,
-            timed_out,
-            stdout_truncated,
-            stderr_truncated,
+            exit_code: Some(output.exit_code),
+            stdout: output.stdout,
+            stderr: output.stderr,
+            timed_out: output.timed_out,
+            stdout_truncated: output.stdout_truncated,
+            stderr_truncated: output.stderr_truncated,
             error: None,
             enforcement,
         }
@@ -204,12 +208,14 @@ mod tests {
     fn success_response_serializes_the_protocol_contract() {
         let response = SandboxResponse::success(
             "request-1".to_owned(),
-            7,
-            "stdout".to_owned(),
-            "stderr".to_owned(),
-            true,
-            true,
-            false,
+            SandboxSuccess {
+                exit_code: 7,
+                stdout: "stdout".to_owned(),
+                stderr: "stderr".to_owned(),
+                timed_out: true,
+                stdout_truncated: true,
+                stderr_truncated: false,
+            },
             EnforcementSummary::windows_v1(),
         );
 

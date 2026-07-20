@@ -9,7 +9,7 @@ WindowsApps distribution cannot start under the restricted token.
 
 1. Extract the ZIP to a stable directory outside the repository/workspace you
    want the agent to edit, for example:
-   %LOCALAPPDATA%\Programs\CodingAgentLab\v0.1.0
+   %LOCALAPPDATA%\Programs\CodingAgentLab\v0.1.1
 2. Set DEEPSEEK_API_KEY in the parent PowerShell process if you want to use the
    real DeepSeek model. The executable intentionally does not load workspace
    .env files.

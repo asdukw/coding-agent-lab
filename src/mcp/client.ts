@@ -3,6 +3,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { z } from "zod";
 import { opaqueToolAccess, type ResourceAccess } from "../tools/resourceLock";
 import type { Tool, Tools } from "../tools/types";
+import { CAGENT_VERSION } from "../version";
 import { loadMcpServerConfigs, type NamedMcpStdioServerConfig } from "./config";
 
 export type McpToolDefinition = {
@@ -128,7 +129,7 @@ export async function connectStdioMcpServer(
 		cwd: process.cwd(),
 	});
 	const client = new Client(
-		{ name: "cagent", version: "0.1.0" },
+		{ name: "cagent", version: CAGENT_VERSION },
 		{ capabilities: {} },
 	);
 
