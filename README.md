@@ -41,7 +41,7 @@ Copy-Item .env.example .env
 bun run demo:deepseek
 ```
 
-也可以不创建 `.env`，直接在父进程中设置 `DEEPSEEK_API_KEY`。Demo 会把同一份 fixture 复制到系统临时 workspace，只向模型提供 `Read`、`Edit`、`UpdatePlan` 与 `ExitPlanMode`，不暴露 `Shell`。计划提交后输入 `approve`、`reject` 或 `abort`；`Edit` 批次执行前输入 `allow`、`deny` 或 `abort`，不存在自动批准模式。
+也可以不创建 `.env`，直接在父进程中设置 `DEEPSEEK_API_KEY`。Demo 会把同一份 fixture 复制到系统临时 workspace，只向模型提供 `Read`、`Edit`、`UpdatePlan` 与 `ExitPlanMode`，不暴露 `Shell`。计划和 `Edit` 批次都通过编号审批菜单选择，不需要键入英文命令，也不存在自动批准模式。
 
 完成后终端会展示模型回复、工具请求与结果、最终 diff，以及脱敏的 JSON / Markdown 报告路径。仓库中的 fixture 不会被修改，API Key、完整 Prompt、模型输出和工具参数不会写入报告。该流程会访问真实 DeepSeek API，输出与调用次数并不确定，可能产生 API 费用，因此只用于本地人工演示，不进入常规 CI。
 
@@ -221,13 +221,10 @@ bun run start "分析当前仓库并给出下一步计划"
 | `/permissions ask\|auto\|full` | 直接切换权限模式 |
 | `/resume <session-id>` | 恢复指定 Session |
 | `/memory` | 初始化并显示当前 workspace 的 Memory Store |
-| `approve` | 批准待执行计划 |
-| `reject <feedback>` | 拒绝计划并要求修改 |
-| `allow` | 仅批准当前工具调用批次 |
-| `always` | 在当前进程会话内批准对应工具 |
-| `deny` | 拒绝当前危险工具调用 |
 
-权限模式与 `always` 授权都不会写入 Session；恢复会话时回到 `ask`，待审批调用也必须重新校验。切换权限模式会清除已有的进程级授权和待审批决定。
+计划和工具审批统一显示为 Codex 风格单选菜单：使用 `↑`/`↓` 与 Enter，或直接按数字快捷键。工具审批可选择仅批准当前批次、在当前进程会话内不再询问这些工具，或拒绝；计划拒绝后会进入可选反馈输入。Esc 对待执行操作采用安全取消，对 `/permissions` 则保持原模式并关闭菜单。
+
+权限模式与“本会话不再询问”授权都不会写入 Session；恢复会话时回到 `ask`，待审批调用也必须重新校验。切换权限模式会清除已有的进程级授权和待审批决定。
 
 ## MCP 配置
 
@@ -246,7 +243,7 @@ bun run start "分析当前仓库并给出下一步计划"
 }
 ```
 
-MCP Server 是外部进程，可能拥有 workspace Sandbox 之外的副作用，因此其工具按危险工具执行审批；当前进程内可受 `always` 授权。
+MCP Server 是外部进程，可能拥有 workspace Sandbox 之外的副作用，因此其工具按危险工具执行审批；当前进程内可选择“本会话不再询问”。
 
 ## Session 与 Memory
 

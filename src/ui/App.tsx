@@ -30,6 +30,7 @@ import { type Tools, toToolSpecs } from "../tools/types";
 import { type AppLifecycle, createAppLifecycle } from "./appLifecycle";
 import { parseLocalCommand } from "./localCommands";
 import { Markdown } from "./Markdown";
+import { SelectionMenu, type SelectionMenuOption } from "./SelectionMenu";
 
 export type AppProps = {
 	task?: string;
@@ -66,6 +67,44 @@ const PERMISSION_OPTIONS: Array<{
 			"Run without approval, filesystem sandboxing, or network restrictions",
 	},
 ];
+
+const TOOL_APPROVAL_OPTIONS: readonly SelectionMenuOption<ToolApprovalDecision>[] =
+	[
+		{
+			value: "allow_once",
+			label: "Yes, proceed",
+			description: "Allow only this paused tool batch.",
+		},
+		{
+			value: "allow_session",
+			label: "Yes, and don't ask again for these tools in this session",
+			description:
+				"Remember the tool names for this process session; static path boundaries still apply.",
+		},
+		{
+			value: "deny",
+			label: "No, reject this request",
+			description: "Return a denial to the agent without running the batch.",
+			tone: "danger",
+		},
+	];
+
+type PlanApprovalChoice = "approve" | "reject";
+
+const PLAN_APPROVAL_OPTIONS: readonly SelectionMenuOption<PlanApprovalChoice>[] =
+	[
+		{
+			value: "approve",
+			label: "Yes, implement this plan",
+			description: "Leave plan mode and continue with implementation.",
+		},
+		{
+			value: "reject",
+			label: "No, keep planning",
+			description: "Optionally tell cagent what should change first.",
+			tone: "danger",
+		},
+	];
 
 type Turn = {
 	id: string;
@@ -143,6 +182,14 @@ export function App({
 	const [permissionChangeInFlight, setPermissionChangeInFlight] =
 		useState(false);
 	const permissionChangeInFlightRef = useRef(false);
+	const [toolApprovalSelection, setToolApprovalSelection] = useState(0);
+	const [planApprovalSelection, setPlanApprovalSelection] = useState(0);
+	const [planFeedbackOpen, setPlanFeedbackOpen] = useState(false);
+	const [planFeedback, setPlanFeedback] = useState("");
+	const pendingPlanApproval =
+		agentState?.toolPermissionContext.pendingPlanApproval;
+	const pendingToolApproval =
+		agentState?.toolPermissionContext.pendingToolApproval;
 
 	const applyApprovalMode = useCallback(
 		(mode: ApprovalMode) => {
@@ -203,39 +250,6 @@ export function App({
 			appLifecycle.track(permissionTask);
 		},
 		[agentRuntime, agentState, appLifecycle, approvalMode],
-	);
-
-	useInput(
-		(input, key) => {
-			if (key.upArrow) {
-				setPermissionSelection(
-					(current) =>
-						(current - 1 + PERMISSION_OPTIONS.length) %
-						PERMISSION_OPTIONS.length,
-				);
-				return;
-			}
-			if (key.downArrow) {
-				setPermissionSelection(
-					(current) => (current + 1) % PERMISSION_OPTIONS.length,
-				);
-				return;
-			}
-			if (key.escape) {
-				setPermissionsOpen(false);
-				return;
-			}
-			const directIndex = input >= "1" && input <= "3" ? Number(input) - 1 : -1;
-			const selectedIndex =
-				directIndex >= 0 ? directIndex : permissionSelection;
-			if (key.return || directIndex >= 0) {
-				const selected = PERMISSION_OPTIONS[selectedIndex];
-				if (selected) {
-					applyApprovalMode(selected.mode);
-				}
-			}
-		},
-		{ isActive: permissionsOpen },
 	);
 
 	const runState = useCallback(
@@ -454,65 +468,113 @@ export function App({
 		);
 	}, [agentState, runState, status]);
 
+	useEffect(() => {
+		if (pendingPlanApproval || pendingToolApproval) {
+			setPermissionsOpen(false);
+		}
+		if (!pendingPlanApproval) {
+			setPlanFeedbackOpen(false);
+			setPlanFeedback("");
+		}
+	}, [pendingPlanApproval, pendingToolApproval]);
+
+	const submitToolApproval = useCallback(
+		(decision: ToolApprovalDecision) => {
+			if (
+				appLifecycle.isClosing ||
+				runInFlightRef.current ||
+				!agentState ||
+				!pendingToolApproval
+			) {
+				return;
+			}
+			if (pendingToolApproval.needsRevalidation) {
+				setError(
+					"Refreshing restored tool approval details; try again shortly.",
+				);
+				return;
+			}
+
+			setError(undefined);
+			setToolApprovalSelection(0);
+			const nextState = resolveToolApproval(agentState, decision);
+			const approvalLabel =
+				decision === "allow_once"
+					? "allow tool calls once"
+					: decision === "allow_session"
+						? "always allow these tools for this session"
+						: "deny tool calls";
+			runState(nextState, approvalLabel, agentState.messages.length);
+		},
+		[agentState, appLifecycle, pendingToolApproval, runState],
+	);
+
+	const submitPlanApproval = useCallback(
+		(decision: PlanApprovalChoice, feedback = "") => {
+			if (
+				appLifecycle.isClosing ||
+				runInFlightRef.current ||
+				!agentState ||
+				!pendingPlanApproval
+			) {
+				return;
+			}
+
+			const normalizedFeedback = feedback.trim();
+			setError(undefined);
+			setPlanApprovalSelection(0);
+			setPlanFeedbackOpen(false);
+			setPlanFeedback("");
+			const nextState = resolvePlanApproval(
+				agentState,
+				decision,
+				normalizedFeedback,
+			);
+			runState(
+				nextState,
+				decision === "approve"
+					? "approve plan"
+					: `reject plan${normalizedFeedback ? `: ${normalizedFeedback}` : ""}`,
+				agentState.messages.length,
+			);
+		},
+		[agentState, appLifecycle, pendingPlanApproval, runState],
+	);
+
+	const choosePlanApproval = useCallback(
+		(decision: PlanApprovalChoice) => {
+			if (decision === "approve") {
+				submitPlanApproval("approve");
+				return;
+			}
+			setError(undefined);
+			setPlanFeedback("");
+			setPlanFeedbackOpen(true);
+		},
+		[submitPlanApproval],
+	);
+
+	useInput(
+		(_input, key) => {
+			if (key.escape) {
+				setPlanFeedbackOpen(false);
+				setPlanFeedback("");
+				setError(undefined);
+			}
+		},
+		{
+			isActive:
+				status === "idle" && Boolean(pendingPlanApproval) && planFeedbackOpen,
+		},
+	);
+
 	const handleSubmit = (value: string) => {
 		if (appLifecycle.isClosing) {
 			return;
 		}
 		setInput("");
-		const toolApproval = parseToolApprovalInput(value);
-		if (agentState?.toolPermissionContext.pendingToolApproval) {
-			if (
-				agentState.toolPermissionContext.pendingToolApproval.needsRevalidation
-			) {
-				setError(
-					"Refreshing restored tool approval details; try again shortly.",
-				);
-				runState(
-					agentState,
-					"refresh restored tool approval",
-					agentState.messages.length,
-				);
-				return;
-			}
-			if (!toolApproval) {
-				setError(
-					'Type "allow" for this batch, "always" for this session, or "deny".',
-				);
-				return;
-			}
-
-			const nextState = resolveToolApproval(agentState, toolApproval);
-			const approvalLabel =
-				toolApproval === "allow_once"
-					? "allow tool calls once"
-					: toolApproval === "allow_session"
-						? "always allow these tools for this session"
-						: "deny tool calls";
-			runState(nextState, approvalLabel, agentState.messages.length);
-			return;
-		}
-
-		const approval = parsePlanApprovalInput(value);
-		if (agentState?.toolPermissionContext.pendingPlanApproval) {
-			if (!approval) {
-				setError(
-					'Type "approve" to continue or "reject <feedback>" to revise.',
-				);
-				return;
-			}
-
-			const nextState = resolvePlanApproval(
-				agentState,
-				approval.decision,
-				approval.feedback,
-			);
-			runState(
-				nextState,
-				approval.decision === "approve"
-					? "approve plan"
-					: `reject plan${approval.feedback ? `: ${approval.feedback}` : ""}`,
-				agentState.messages.length,
-			);
+		if (pendingToolApproval || pendingPlanApproval) {
+			setError("Resolve the pending approval with the selection menu.");
 			return;
 		}
 
@@ -619,11 +681,6 @@ export function App({
 		runTurn(value);
 	};
 
-	const pendingPlanApproval =
-		agentState?.toolPermissionContext.pendingPlanApproval;
-	const pendingToolApproval =
-		agentState?.toolPermissionContext.pendingToolApproval;
-
 	return (
 		<Box flexDirection="column" gap={1}>
 			<Box flexDirection="column">
@@ -670,6 +727,7 @@ export function App({
 					paddingX={1}
 				>
 					<Text color="yellow">tool approval</Text>
+					<Text bold>Would you like to run these tool calls?</Text>
 					{pendingToolApproval.calls.map((call) => {
 						const request = pendingToolApproval.requests.find(
 							(candidate) =>
@@ -687,10 +745,21 @@ export function App({
 							</Box>
 						);
 					})}
-					<Text color="gray">
-						Type "allow" for this batch, "always" for these tools during this
-						process session, or "deny". Static path boundaries still apply.
-					</Text>
+					{pendingToolApproval.needsRevalidation ? (
+						<Text color="yellow">
+							Refreshing restored approval details before accepting a
+							decision...
+						</Text>
+					) : (
+						<SelectionMenu
+							isActive={status === "idle" && !permissionChangeInFlight}
+							onCancel={() => submitToolApproval("deny")}
+							onConfirm={submitToolApproval}
+							onSelectionChange={setToolApprovalSelection}
+							options={TOOL_APPROVAL_OPTIONS}
+							selectedIndex={toolApprovalSelection}
+						/>
+					)}
 				</Box>
 			) : null}
 
@@ -703,9 +772,35 @@ export function App({
 				>
 					<Text color="yellow">plan approval</Text>
 					<Markdown>{pendingPlanApproval.plan}</Markdown>
-					<Text color="gray">
-						Type "approve" to continue or "reject &lt;feedback&gt;" to revise.
-					</Text>
+					{planFeedbackOpen ? (
+						<Box flexDirection="column" marginTop={1}>
+							<Text bold>What should cagent change before asking again?</Text>
+							<Box borderStyle="round" borderColor="cyan" paddingX={1}>
+								<Text color="green">{"> "}</Text>
+								<TextInput
+									focus={status === "idle"}
+									onChange={setPlanFeedback}
+									onSubmit={(feedback) =>
+										submitPlanApproval("reject", feedback)
+									}
+									placeholder="Describe the changes (optional)..."
+									value={planFeedback}
+								/>
+							</Box>
+							<Text color="gray">
+								Press Enter to send feedback, or Esc to return to the choices.
+							</Text>
+						</Box>
+					) : (
+						<SelectionMenu
+							isActive={status === "idle" && !permissionChangeInFlight}
+							onCancel={() => submitPlanApproval("reject")}
+							onConfirm={choosePlanApproval}
+							onSelectionChange={setPlanApprovalSelection}
+							options={PLAN_APPROVAL_OPTIONS}
+							selectedIndex={planApprovalSelection}
+						/>
+					)}
 				</Box>
 			) : null}
 
@@ -723,38 +818,32 @@ export function App({
 					paddingX={1}
 				>
 					<Text color="yellow">How should cagent actions be approved?</Text>
-					{PERMISSION_OPTIONS.map((option, index) => {
-						const selected = permissionSelection === index;
-						return (
-							<Box flexDirection="column" key={option.mode} marginTop={1}>
-								<Text color={option.mode === "full_access" ? "red" : "white"}>
-									{selected ? ">" : " "} {index + 1}. {option.label}
-									{approvalMode === option.mode ? " (current)" : ""}
-								</Text>
-								<Text color="gray"> {option.description}</Text>
-							</Box>
-						);
-					})}
-					<Text color="gray">
-						Use ↑/↓ and Enter, press 1-3, or Esc to cancel. Full access gives
-						the agent your host-user authority.
-					</Text>
+					<SelectionMenu
+						footer="Use ↑/↓ and Enter, press 1-3, or Esc to cancel. Full access gives the agent your host-user authority."
+						onCancel={() => setPermissionsOpen(false)}
+						onConfirm={applyApprovalMode}
+						onSelectionChange={setPermissionSelection}
+						options={PERMISSION_OPTIONS.map((option) => ({
+							value: option.mode,
+							label: `${option.label}${approvalMode === option.mode ? " (current)" : ""}`,
+							description: option.description,
+							tone: option.mode === "full_access" ? "danger" : "default",
+						}))}
+						selectedIndex={permissionSelection}
+					/>
 				</Box>
-			) : status === "idle" && !permissionChangeInFlight ? (
+			) : status === "idle" &&
+				!permissionChangeInFlight &&
+				!pendingToolApproval &&
+				!pendingPlanApproval ? (
 				<Box borderStyle="round" borderColor="cyan" paddingX={1}>
 					<Text color="green">{"> "}</Text>
 					<TextInput
-						focus={!permissionsOpen}
+						focus
 						value={input}
 						onChange={setInput}
 						onSubmit={handleSubmit}
-						placeholder={
-							pendingToolApproval
-								? "allow, always, or deny..."
-								: pendingPlanApproval
-									? "approve or reject with feedback..."
-									: "Type a message and press Enter..."
-						}
+						placeholder="Type a message and press Enter..."
 					/>
 				</Box>
 			) : null}
@@ -764,53 +853,6 @@ export function App({
 
 function formatCaught(caught: unknown): string {
 	return caught instanceof Error ? caught.message : String(caught);
-}
-
-function parsePlanApprovalInput(
-	value: string,
-): { decision: "approve" | "reject"; feedback: string } | undefined {
-	const trimmed = value.trim();
-	const lower = trimmed.toLowerCase();
-
-	if (["approve", "approved", "yes", "y"].includes(lower)) {
-		return { decision: "approve", feedback: "" };
-	}
-
-	if (lower === "reject" || lower.startsWith("reject ")) {
-		return {
-			decision: "reject",
-			feedback: trimmed.slice("reject".length).trim(),
-		};
-	}
-
-	if (lower === "no" || lower.startsWith("no ")) {
-		return {
-			decision: "reject",
-			feedback: trimmed.slice("no".length).trim(),
-		};
-	}
-
-	return undefined;
-}
-
-function parseToolApprovalInput(
-	value: string,
-): ToolApprovalDecision | undefined {
-	const normalized = value.trim().toLowerCase().replace(/\s+/g, " ");
-	if (["allow", "allow once", "once", "yes", "y"].includes(normalized)) {
-		return "allow_once";
-	}
-	if (
-		["always", "allow always", "always allow", "allow session"].includes(
-			normalized,
-		)
-	) {
-		return "allow_session";
-	}
-	if (["deny", "no", "n"].includes(normalized)) {
-		return "deny";
-	}
-	return undefined;
 }
 
 function formatApprovalArguments(argumentsText: string): string {

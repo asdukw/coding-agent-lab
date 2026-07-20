@@ -1,5 +1,5 @@
 import { expect, setDefaultTimeout, test } from "bun:test";
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { access, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { render } from "ink-testing-library";
@@ -272,9 +272,11 @@ test("/memory initializes the memory store locally without calling the model", a
 
 class PlanApprovalModelClient implements ModelClient {
 	readonly name = "plan-approval";
+	readonly requests: ModelRequest[] = [];
 	private callCount = 0;
 
-	async *stream(_request: ModelRequest): AsyncGenerator<ModelStreamEvent> {
+	async *stream(request: ModelRequest): AsyncGenerator<ModelStreamEvent> {
+		this.requests.push(request);
 		this.callCount++;
 		if (this.callCount === 1) {
 			yield {
@@ -333,20 +335,15 @@ test("plan approval prompt continues after approve", async () => {
 		);
 		stdin.write("\r");
 		await waitForFrame(lastFrame, "plan approval");
-		await waitForInputReady(lastFrame, "approve or reject with feedback...");
+		await waitForFrame(lastFrame, "Yes, implement this plan");
 
 		let frame = lastFrame() ?? "";
 		expect(frame).toContain("plan approval");
 		expect(frame).toContain("Update approval UI");
-		expect(frame).toContain("approve or reject");
+		expect(frame).toContain("No, keep planning");
+		expect(frame).not.toContain("approve or reject with feedback...");
 
-		stdin.write("approve");
-		await waitForInputValue(
-			lastFrame,
-			"approve",
-			"approve or reject with feedback...",
-		);
-		stdin.write("\r");
+		stdin.write("1");
 		await waitForFrame(lastFrame, [
 			"approve plan",
 			"implementation started",
@@ -356,6 +353,51 @@ test("plan approval prompt continues after approve", async () => {
 		frame = lastFrame() ?? "";
 		expect(frame).toContain("approve plan");
 		expect(frame).toContain("implementation started");
+	} finally {
+		await cleanupApp(unmount, lifecycle, cwd);
+	}
+});
+
+test("plan rejection menu collects optional feedback before continuing", async () => {
+	const cwd = await makeTempDir();
+	const model = new PlanApprovalModelClient();
+	const lifecycle = createAppLifecycle();
+	const { lastFrame, stdin, unmount } = render(
+		<App
+			cwd={cwd}
+			model={model}
+			enableMemoryExtraction={false}
+			lifecycle={lifecycle}
+		/>,
+	);
+
+	try {
+		await waitForInputReady(lastFrame, "Type a message and press Enter...");
+		stdin.write("plan this change");
+		stdin.write("\r");
+		await waitForFrame(lastFrame, "No, keep planning");
+
+		stdin.write("2");
+		await waitForInputReady(lastFrame, "Describe the changes (optional)...");
+		stdin.write("Add a validation step");
+		await waitForInputValue(
+			lastFrame,
+			"Add a validation step",
+			"Describe the changes (optional)...",
+		);
+		stdin.write("\r");
+
+		await waitForFrame(lastFrame, [
+			"reject plan: Add a validation step",
+			"implementation started",
+		]);
+		expect(
+			model.requests
+				.at(-1)
+				?.messages.some((message) =>
+					message.content.includes("Add a validation step"),
+				),
+		).toBe(true);
 	} finally {
 		await cleanupApp(unmount, lifecycle, cwd);
 	}
@@ -409,16 +451,16 @@ test("tool approval prompt resumes the original call after allow", async () => {
 		);
 		stdin.write("\r");
 		await waitForFrame(lastFrame, "tool approval");
-		await waitForInputReady(lastFrame, "allow, always, or deny...");
+		await waitForFrame(lastFrame, "Yes, proceed");
 
 		let frame = lastFrame() ?? "";
 		expect(frame).toContain("Write");
 		expect(frame).toContain("approved.txt");
-		expect(frame).toContain("allow, always, or deny");
+		expect(frame).toContain("don't ask again for these tools in this session");
+		expect(frame).toContain("No, reject this request");
+		expect(frame).not.toContain("allow, always, or deny...");
 
-		stdin.write("allow");
-		await waitForInputValue(lastFrame, "allow", "allow, always, or deny...");
-		stdin.write("\r");
+		stdin.write("1");
 		await waitForFrame(lastFrame, [
 			"write completed",
 			"Type a message and press Enter...",
@@ -427,6 +469,36 @@ test("tool approval prompt resumes the original call after allow", async () => {
 		frame = lastFrame() ?? "";
 		expect(frame).not.toContain("tool approval");
 		expect(await readFile(filePath, "utf8")).toBe("approved content");
+	} finally {
+		await cleanupApp(unmount, lifecycle, cwd);
+	}
+});
+
+test("tool approval menu denies the batch with the safe numeric choice", async () => {
+	const cwd = await makeTempDir();
+	const filePath = join(cwd, "denied.txt");
+	const lifecycle = createAppLifecycle();
+	const { lastFrame, stdin, unmount } = render(
+		<App
+			cwd={cwd}
+			model={new ToolApprovalModelClient(filePath)}
+			enableMemoryExtraction={false}
+			lifecycle={lifecycle}
+		/>,
+	);
+
+	try {
+		await waitForInputReady(lastFrame, "Type a message and press Enter...");
+		stdin.write("write a file");
+		stdin.write("\r");
+		await waitForFrame(lastFrame, "No, reject this request");
+
+		stdin.write("3");
+		await waitForFrame(lastFrame, [
+			"deny tool calls",
+			"Type a message and press Enter...",
+		]);
+		await expect(access(filePath)).rejects.toThrow();
 	} finally {
 		await cleanupApp(unmount, lifecycle, cwd);
 	}

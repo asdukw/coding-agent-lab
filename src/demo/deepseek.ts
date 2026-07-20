@@ -14,7 +14,7 @@ const HELP = `Usage: bun run demo:deepseek [--output-dir <path>]
 
 Runs a real DeepSeek coding-agent scenario in a temporary workspace.
 The repository root .env file is loaded explicitly for DEEPSEEK_* values only.
-Plan and Edit actions require interactive approval; there is no auto-approve mode.
+Plan and Edit actions use numbered Codex-style approval menus; there is no auto-approve mode.
 `;
 
 async function main(): Promise<void> {
@@ -137,19 +137,24 @@ async function decidePlan(
 	plan: string,
 ): Promise<DeepSeekPlanDecision> {
 	process.stdout.write(`\n[plan approval]\n${sanitizeTerminalText(plan)}\n`);
+	writeChoiceMenu("Would you like to implement this plan?", [
+		"Yes, implement this plan",
+		"No, keep planning and provide feedback",
+		"Cancel the demo",
+	]);
 	for (;;) {
-		const answer = await ask(readline, "Type approve, reject, or abort: ");
-		if (answer === "approve") {
+		const answer = await ask(readline, "Select 1-3: ");
+		if (answer === "1" || answer === "approve") {
 			return { decision: "approve" };
 		}
-		if (answer === "reject") {
+		if (answer === "2" || answer === "reject") {
 			const feedback = await ask(readline, "Plan feedback: ", false);
 			return { decision: "reject", feedback };
 		}
-		if (answer === "abort") {
+		if (answer === "3" || answer === "abort") {
 			return { decision: "abort" };
 		}
-		process.stdout.write("Expected exactly: approve, reject, or abort.\n");
+		process.stdout.write("Choose 1, 2, or 3.\n");
 	}
 }
 
@@ -177,18 +182,30 @@ async function decideTools(
 			);
 		}
 	}
+	writeChoiceMenu("Would you like to run this tool batch?", [
+		"Yes, proceed once",
+		"No, reject this request",
+		"Cancel the demo",
+	]);
 	for (;;) {
-		const answer = await ask(readline, "Type allow, deny, or abort: ");
-		if (answer === "allow") {
+		const answer = await ask(readline, "Select 1-3: ");
+		if (answer === "1" || answer === "allow") {
 			return "allow_once";
 		}
-		if (answer === "deny") {
+		if (answer === "2" || answer === "deny") {
 			return "deny";
 		}
-		if (answer === "abort") {
+		if (answer === "3" || answer === "abort") {
 			return "abort";
 		}
-		process.stdout.write("Expected exactly: allow, deny, or abort.\n");
+		process.stdout.write("Choose 1, 2, or 3.\n");
+	}
+}
+
+function writeChoiceMenu(title: string, options: readonly string[]): void {
+	process.stdout.write(`${title}\n`);
+	for (const [index, option] of options.entries()) {
+		process.stdout.write(`  ${index + 1}. ${option}\n`);
 	}
 }
 
