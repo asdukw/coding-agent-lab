@@ -222,7 +222,7 @@ async function ensureSessionStartedUnlocked(
 			task: state.task,
 		},
 	});
-	await appendSessionIndex(cwd, state);
+	await updateSessionIndex(cwd, state);
 	return path;
 }
 
@@ -265,7 +265,7 @@ export async function appendSessionState(
 				changedFiles: state.changedFiles,
 			},
 		});
-		await appendSessionIndex(cwd, state);
+		await updateSessionIndex(cwd, state);
 	});
 }
 
@@ -286,7 +286,7 @@ export async function appendSessionCompaction(
 				compaction: state.compaction,
 			},
 		});
-		await appendSessionIndex(cwd, state);
+		await updateSessionIndex(cwd, state);
 	});
 }
 
@@ -411,7 +411,7 @@ export async function saveSession(
 			path,
 			`${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
 		);
-		await appendSessionIndex(cwd, state);
+		await updateSessionIndex(cwd, state);
 		return path;
 	});
 }
@@ -446,7 +446,7 @@ async function appendSessionEventUnlocked(
 	await appendFile(path, `${JSON.stringify(event)}\n`, "utf8");
 }
 
-async function appendSessionIndex(
+async function updateSessionIndex(
 	cwd: string,
 	state: AgentState,
 ): Promise<void> {
@@ -456,16 +456,129 @@ async function appendSessionIndex(
 		const entry: SessionIndexEntry = {
 			version: 1,
 			sessionId: state.sessionId,
-			cwd: state.cwd,
+			cwd: resolve(cwd),
 			task: state.task,
 			path: relative(resolve(cwd), sessionPath),
 			updatedAt: new Date().toISOString(),
 		};
 
 		await mkdir(dirname(indexPath), { recursive: true });
-		await truncateIncompleteTail(indexPath);
-		await appendFile(indexPath, `${JSON.stringify(entry)}\n`, "utf8");
+		const entries = await readSessionIndex(indexPath, cwd);
+		const latestBySession = new Map(
+			entries.map((existing) => [existing.sessionId, existing]),
+		);
+		latestBySession.set(entry.sessionId, entry);
+		await atomicReplaceFile(
+			indexPath,
+			`${[...latestBySession.values()]
+				.map((latest) => JSON.stringify(latest))
+				.join("\n")}\n`,
+		);
 	});
+}
+
+async function readSessionIndex(
+	indexPath: string,
+	cwd: string,
+): Promise<SessionIndexEntry[]> {
+	let raw: string;
+	try {
+		raw = await readFile(indexPath, "utf8");
+	} catch (caught) {
+		if (isNotFoundError(caught)) {
+			return [];
+		}
+		throw caught;
+	}
+	if (raw.length === 0) {
+		return [];
+	}
+
+	const lines = raw.split(/\r?\n/);
+	const hasTerminatingNewline = /\r?\n$/.test(raw);
+	const latestBySession = new Map<string, SessionIndexEntry>();
+	for (const [index, line] of lines.entries()) {
+		if (!line.trim()) {
+			const isTerminatingLine =
+				index === lines.length - 1 && line === "" && hasTerminatingNewline;
+			if (isTerminatingLine) {
+				continue;
+			}
+			throw new Error(
+				`invalid session index entry at line ${index + 1}: empty records are not allowed`,
+			);
+		}
+
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(line) as unknown;
+		} catch (caught) {
+			const isIncompleteTail =
+				index === lines.length - 1 && !hasTerminatingNewline;
+			if (isIncompleteTail) {
+				break;
+			}
+			throw new Error(
+				`invalid session index entry at line ${index + 1}: ${formatCaught(caught)}`,
+			);
+		}
+
+		let entry: SessionIndexEntry;
+		try {
+			entry = decodeSessionIndexEntry(parsed, cwd);
+		} catch (caught) {
+			throw new Error(
+				`invalid session index entry at line ${index + 1}: ${formatCaught(caught)}`,
+			);
+		}
+		// The index used to be an append-only update log. Preserve the last
+		// committed occurrence while migrating it to one current row per session.
+		latestBySession.set(entry.sessionId, entry);
+	}
+	return [...latestBySession.values()];
+}
+
+function decodeSessionIndexEntry(
+	value: unknown,
+	cwd: string,
+): SessionIndexEntry {
+	const entry = requireSessionRecord(value, "session index entry");
+	assertSessionKeys(
+		entry,
+		["version", "sessionId", "cwd", "task", "path", "updatedAt"],
+		[],
+		"session index entry",
+	);
+	if (entry.version !== 1) {
+		throw new Error("session index entry.version must be 1");
+	}
+	const sessionId = requireSessionId(entry, "session index entry");
+	requireNonEmptySessionString(entry, "cwd", "session index entry");
+	const task = requireSessionString(entry, "task", "session index entry");
+	const path = requireNonEmptySessionString(
+		entry,
+		"path",
+		"session index entry",
+	);
+	const expectedPath = relative(resolve(cwd), getSessionPath(cwd, sessionId));
+	if (path !== expectedPath) {
+		throw new Error(
+			`session index entry.path does not match sessionId ${sessionId}`,
+		);
+	}
+	const updatedAt = requireSessionTimestamp(
+		entry,
+		"updatedAt",
+		"session index entry",
+	);
+	return {
+		version: 1,
+		sessionId,
+		cwd: resolve(cwd),
+		task,
+		path,
+		updatedAt,
+	};
 }
 
 async function serializeWrite<T>(

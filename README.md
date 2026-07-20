@@ -251,7 +251,7 @@ MCP Server 是外部进程，可能拥有 workspace Sandbox 之外的副作用�
 ## Session 与 Memory
 
 - Session 事件保存在 `.cagent/sessions/*.jsonl`。
-- Session Index 保存在 `.cagent/sessions/session_index.jsonl`。
+- Session Index 保存在 `.cagent/sessions/session_index.jsonl`；每个 Session 只保留最新条目，并通过同目录临时文件原子替换。
 - 长期 Memory 保存在 `.cagent/memory/`。Memory Agent 只能写入这里；主 Agent 也可以通过经过路径和格式验证的 `Write` / `Edit` 更新 topic 文件。
 - `.cagent/memory/MEMORY.md` 由系统根据 topic frontmatter 自动维护，不能直接修改。
 - Memory Extraction 结果通常写入 Session；若 Session 事件无法持久化，才回退到 `.cagent/audit/memory-extraction/`。

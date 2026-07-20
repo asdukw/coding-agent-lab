@@ -467,12 +467,60 @@ test("concurrent saves to one session leave one complete snapshot", async () => 
 		const restored = await loadSession(cwd, "same-session-save");
 		expect(restored.task).toBe(savedTask);
 		expect(restored.turn).toBe(savedTurn);
+		const indexEntries = (await readFile(getSessionIndexPath(cwd), "utf8"))
+			.trim()
+			.split("\n")
+			.map((line) => {
+				const entry = JSON.parse(line) as {
+					sessionId: string;
+					task: string;
+				};
+				return { sessionId: entry.sessionId, task: entry.task };
+			});
+		expect(indexEntries).toEqual([
+			{ sessionId: "same-session-save", task: savedTask },
+		]);
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}
 });
 
-test("a later index append removes an incomplete index tail", async () => {
+test("updating the index compacts legacy duplicate session entries", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "cagent-session-"));
+	try {
+		const initial = createInitialState(
+			"initial task",
+			cwd,
+			[],
+			"compact-index-1",
+		);
+		await saveSession(cwd, initial);
+		const indexPath = getSessionIndexPath(cwd);
+		const originalEntry = await readFile(indexPath, "utf8");
+		await appendFile(indexPath, originalEntry, "utf8");
+
+		const updated = { ...initial, task: "updated task", turn: 1 };
+		await appendSessionState(cwd, updated);
+
+		const entries = (await readFile(indexPath, "utf8"))
+			.trim()
+			.split("\n")
+			.map((line) => {
+				const entry = JSON.parse(line) as {
+					sessionId: string;
+					task: string;
+				};
+				return { sessionId: entry.sessionId, task: entry.task };
+			});
+		expect(entries).toEqual([
+			{ sessionId: "compact-index-1", task: "updated task" },
+		]);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("a later index update removes an incomplete index tail", async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "cagent-session-"));
 	try {
 		const first = createInitialState("first", cwd, [], "index-tail-1");
@@ -491,6 +539,26 @@ test("a later index append removes an incomplete index tail", async () => {
 				.split("\n")
 				.map((line) => (JSON.parse(line) as { sessionId: string }).sessionId),
 		).toEqual([first.sessionId, second.sessionId]);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("an index update rejects middle corruption without replacing the index", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "cagent-session-"));
+	try {
+		const first = createInitialState("first", cwd, [], "index-corrupt-1");
+		const second = createInitialState("second", cwd, [], "index-corrupt-2");
+		await saveSession(cwd, first);
+		const indexPath = getSessionIndexPath(cwd);
+		const validEntry = (await readFile(indexPath, "utf8")).trim();
+		await appendFile(indexPath, `{"broken":\n${validEntry}\n`, "utf8");
+		const corrupted = await readFile(indexPath, "utf8");
+
+		await expect(saveSession(cwd, second)).rejects.toThrow(
+			"invalid session index entry at line 2",
+		);
+		expect(await readFile(indexPath, "utf8")).toBe(corrupted);
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}
