@@ -1,4 +1,4 @@
-import { Box, Text } from "ink";
+import { Box, Text, useInput } from "ink";
 import TextInput from "ink-text-input";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { InProcessAgentManager } from "../agents/manager";
@@ -16,11 +16,13 @@ import {
 } from "../sessionStore";
 import {
 	type AgentState,
+	type ApprovalMode,
 	continueState,
 	createInitialState,
 	enterPlanMode,
 	resolvePlanApproval,
 	resolveToolApproval,
+	setApprovalMode as setStateApprovalMode,
 	type ToolApprovalDecision,
 } from "../state";
 import { BUILTIN_TOOLS } from "../tools";
@@ -40,6 +42,30 @@ export type AppProps = {
 };
 
 const EMPTY_TOOLS: Tools = [];
+
+const PERMISSION_OPTIONS: Array<{
+	mode: ApprovalMode;
+	label: string;
+	description: string;
+}> = [
+	{
+		mode: "ask",
+		label: "Ask for approval",
+		description: "Ask before workspace edits, Shell, or external MCP calls",
+	},
+	{
+		mode: "auto",
+		label: "Approve for me",
+		description:
+			"Automatically allow bounded workspace edits; ask for Shell and MCP calls",
+	},
+	{
+		mode: "full_access",
+		label: "Full access",
+		description:
+			"Run without approval, filesystem sandboxing, or network restrictions",
+	},
+];
 
 type Turn = {
 	id: string;
@@ -111,6 +137,106 @@ export function App({
 	const [input, setInput] = useState("");
 	const [error, setError] = useState<string | undefined>();
 	const [agentInboxRevision, setAgentInboxRevision] = useState(0);
+	const [approvalMode, setApprovalMode] = useState<ApprovalMode>("ask");
+	const [permissionsOpen, setPermissionsOpen] = useState(false);
+	const [permissionSelection, setPermissionSelection] = useState(0);
+	const [permissionChangeInFlight, setPermissionChangeInFlight] =
+		useState(false);
+	const permissionChangeInFlightRef = useRef(false);
+
+	const applyApprovalMode = useCallback(
+		(mode: ApprovalMode) => {
+			if (permissionChangeInFlightRef.current) {
+				return;
+			}
+			const option = PERMISSION_OPTIONS.find(
+				(candidate) => candidate.mode === mode,
+			);
+			const currentMode =
+				agentState?.toolPermissionContext.approvalMode ?? approvalMode;
+			const recordChange = () =>
+				setHistory((current) => [
+					...current,
+					{
+						id: `local-permissions-${current.length + 1}`,
+						user: "/permissions",
+						assistant: `${option?.label ?? mode}\n\n${option?.description ?? ""}`,
+					},
+				]);
+
+			setPermissionsOpen(false);
+			setError(undefined);
+			if (currentMode === mode) {
+				recordChange();
+				return;
+			}
+
+			permissionChangeInFlightRef.current = true;
+			setPermissionChangeInFlight(true);
+			const permissionTask = (async () => {
+				try {
+					if (agentState) {
+						await agentRuntime.quiesceForPermissionChange(
+							agentState,
+							`permission policy changed from ${currentMode} to ${mode}`,
+						);
+					}
+					if (appLifecycle.isClosing) {
+						return;
+					}
+					setApprovalMode(mode);
+					setAgentState((current) =>
+						current ? setStateApprovalMode(current, mode) : current,
+					);
+					recordChange();
+				} catch (caught) {
+					if (!appLifecycle.isClosing) {
+						setError(`permission change failed: ${formatCaught(caught)}`);
+					}
+				} finally {
+					permissionChangeInFlightRef.current = false;
+					if (!appLifecycle.isClosing) {
+						setPermissionChangeInFlight(false);
+					}
+				}
+			})();
+			appLifecycle.track(permissionTask);
+		},
+		[agentRuntime, agentState, appLifecycle, approvalMode],
+	);
+
+	useInput(
+		(input, key) => {
+			if (key.upArrow) {
+				setPermissionSelection(
+					(current) =>
+						(current - 1 + PERMISSION_OPTIONS.length) %
+						PERMISSION_OPTIONS.length,
+				);
+				return;
+			}
+			if (key.downArrow) {
+				setPermissionSelection(
+					(current) => (current + 1) % PERMISSION_OPTIONS.length,
+				);
+				return;
+			}
+			if (key.escape) {
+				setPermissionsOpen(false);
+				return;
+			}
+			const directIndex = input >= "1" && input <= "3" ? Number(input) - 1 : -1;
+			const selectedIndex =
+				directIndex >= 0 ? directIndex : permissionSelection;
+			if (key.return || directIndex >= 0) {
+				const selected = PERMISSION_OPTIONS[selectedIndex];
+				if (selected) {
+					applyApprovalMode(selected.mode);
+				}
+			}
+		},
+		{ isActive: permissionsOpen },
+	);
 
 	const runState = useCallback(
 		(
@@ -118,7 +244,11 @@ export function App({
 			userText: string,
 			persistFromMessageIndex: number,
 		) => {
-			if (runInFlightRef.current || appLifecycle.isClosing) {
+			if (
+				runInFlightRef.current ||
+				permissionChangeInFlightRef.current ||
+				appLifecycle.isClosing
+			) {
 				return;
 			}
 
@@ -242,13 +372,14 @@ export function App({
 				return;
 			}
 
-			const initialState = agentState
+			const baseState = agentState
 				? continueState(agentState, trimmed)
 				: createInitialState(trimmed, cwd, toToolSpecs(tools));
+			const initialState = setStateApprovalMode(baseState, approvalMode);
 
 			runState(initialState, trimmed, agentState?.messages.length ?? 0);
 		},
-		[agentState, appLifecycle, cwd, runState, status, tools],
+		[agentState, appLifecycle, approvalMode, cwd, runState, status, tools],
 	);
 
 	// biome-ignore lint/correctness/useExhaustiveDependencies: intentionally runs once on mount, not on every task/runTurn change
@@ -289,6 +420,7 @@ export function App({
 		void agentInboxRevision;
 		if (
 			status !== "idle" ||
+			permissionChangeInFlight ||
 			!agentState ||
 			agentState.toolPermissionContext.pendingPlanApproval ||
 			agentState.toolPermissionContext.pendingToolApproval ||
@@ -299,7 +431,14 @@ export function App({
 			return;
 		}
 		runState(agentState, "sub-agent notification", agentState.messages.length);
-	}, [agentInboxRevision, agentRuntime, agentState, runState, status]);
+	}, [
+		agentInboxRevision,
+		agentRuntime,
+		agentState,
+		permissionChangeInFlight,
+		runState,
+		status,
+	]);
 
 	useEffect(() => {
 		if (
@@ -396,6 +535,7 @@ export function App({
 					try {
 						const restored = await loadSession(cwd, localCommand.sessionId);
 						if (!appLifecycle.isClosing) {
+							setApprovalMode("ask");
 							setAgentState(restored);
 							setHistory(historyFromState(restored));
 						}
@@ -408,6 +548,21 @@ export function App({
 					}
 				})();
 				appLifecycle.track(resumeTask);
+				return;
+			}
+
+			if (localCommand.type === "open_permissions") {
+				const currentIndex = PERMISSION_OPTIONS.findIndex(
+					(option) => option.mode === approvalMode,
+				);
+				setPermissionSelection(Math.max(0, currentIndex));
+				setPermissionsOpen(true);
+				setError(undefined);
+				return;
+			}
+
+			if (localCommand.type === "set_permissions") {
+				applyApprovalMode(localCommand.mode);
 				return;
 			}
 
@@ -440,8 +595,11 @@ export function App({
 			}
 
 			if (localCommand.type === "enter_plan_mode") {
-				const nextState = enterPlanMode(
-					agentState ?? createInitialState("/plan", cwd, toToolSpecs(tools)),
+				const nextState = setStateApprovalMode(
+					enterPlanMode(
+						agentState ?? createInitialState("/plan", cwd, toToolSpecs(tools)),
+					),
+					approvalMode,
 				);
 				setAgentState(nextState);
 				setHistory((current) => [
@@ -471,6 +629,7 @@ export function App({
 			<Box flexDirection="column">
 				<Text color="cyan">cagent</Text>
 				<Text color="gray">cwd: {cwd}</Text>
+				<Text color="gray">permissions: {approvalMode}</Text>
 				{agentState ? (
 					<Text color="gray">session: {agentState.sessionId}</Text>
 				) : null}
@@ -550,10 +709,42 @@ export function App({
 				</Box>
 			) : null}
 
-			{status === "idle" ? (
+			{permissionChangeInFlight ? (
+				<Text color="yellow">
+					Stopping active sub-agents before changing permissions...
+				</Text>
+			) : null}
+
+			{status === "idle" && !permissionChangeInFlight && permissionsOpen ? (
+				<Box
+					borderStyle="round"
+					borderColor="yellow"
+					flexDirection="column"
+					paddingX={1}
+				>
+					<Text color="yellow">How should cagent actions be approved?</Text>
+					{PERMISSION_OPTIONS.map((option, index) => {
+						const selected = permissionSelection === index;
+						return (
+							<Box flexDirection="column" key={option.mode} marginTop={1}>
+								<Text color={option.mode === "full_access" ? "red" : "white"}>
+									{selected ? ">" : " "} {index + 1}. {option.label}
+									{approvalMode === option.mode ? " (current)" : ""}
+								</Text>
+								<Text color="gray"> {option.description}</Text>
+							</Box>
+						);
+					})}
+					<Text color="gray">
+						Use ↑/↓ and Enter, press 1-3, or Esc to cancel. Full access gives
+						the agent your host-user authority.
+					</Text>
+				</Box>
+			) : status === "idle" && !permissionChangeInFlight ? (
 				<Box borderStyle="round" borderColor="cyan" paddingX={1}>
 					<Text color="green">{"> "}</Text>
 					<TextInput
+						focus={!permissionsOpen}
 						value={input}
 						onChange={setInput}
 						onSubmit={handleSubmit}

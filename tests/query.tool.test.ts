@@ -22,6 +22,7 @@ import type {
 	ModelRequest,
 	ModelStreamEvent,
 } from "../src/model/client";
+import { StubModelClient } from "../src/model/stub";
 import type { Terminal } from "../src/query";
 import { query } from "../src/query";
 import {
@@ -866,6 +867,25 @@ test("query emits a memory extraction request after a tool-free complete turn", 
 		}
 
 		expect(events).toContain("memory_extraction_request");
+		expect(events.at(-1)).toBe("terminal");
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("query skips memory extraction when the model does not support it", async () => {
+	const cwd = await makeTempDir();
+	try {
+		const events: string[] = [];
+		for await (const event of query({
+			initialState: createInitialState("generate a random number", cwd),
+			model: new StubModelClient(),
+			tools: [],
+		})) {
+			events.push(event.type);
+		}
+
+		expect(events).not.toContain("memory_extraction_request");
 		expect(events.at(-1)).toBe("terminal");
 	} finally {
 		await rm(cwd, { recursive: true, force: true });

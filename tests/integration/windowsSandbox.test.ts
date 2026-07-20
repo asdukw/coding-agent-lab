@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
 	copyFile,
+	link,
 	mkdir,
 	mkdtemp,
 	readdir,
@@ -37,6 +38,9 @@ integrationTest(
 		);
 		const workspace = join(testRoot, "workspace");
 		const outsideSentinel = join(testRoot, "outside-sentinel.txt");
+		const outsideHardlinkTarget = join(testRoot, "bun-cache-entry.txt");
+		const workspaceHardlink = join(workspace, "linked-dependency.txt");
+		const fullAccessOutput = join(testRoot, "full-access-output.txt");
 		const environmentSecret = "must-not-cross-the-sandbox-boundary";
 		const previousSecret = process.env.CAGENT_E2E_SECRET;
 
@@ -46,6 +50,8 @@ integrationTest(
 			await writeFile(join(workspace, ".env.test"), "env-safe\n", "utf8");
 			await writeFile(join(workspace, "AGENTS.md"), "agents-safe\n", "utf8");
 			await writeFile(outsideSentinel, "outside-safe\n", "utf8");
+			await writeFile(outsideHardlinkTarget, "cache-safe\n", "utf8");
+			await link(outsideHardlinkTarget, workspaceHardlink);
 
 			const inWorkspaceHelper = join(workspace, basename(helperPath));
 			await copyFile(helperPath, inWorkspaceHelper);
@@ -83,6 +89,31 @@ integrationTest(
 			});
 			expect(await readFile(join(workspace, "allowed.txt"), "utf8")).toContain(
 				"inside-ok",
+			);
+
+			const hardlinkRead = await sandbox.runPowerShell({
+				command:
+					"Write-Output (Get-Content -LiteralPath 'linked-dependency.txt' -Raw -ErrorAction Stop)",
+			});
+			expect(hardlinkRead.exitCode).toBe(0);
+			expect(hardlinkRead.stdout).toContain("cache-safe");
+
+			const hardlinkAttempt = await sandbox.runPowerShell({
+				command: [
+					"try {",
+					"  Set-Content -LiteralPath 'linked-dependency.txt' -Value 'tampered' -ErrorAction Stop",
+					"  exit 0",
+					"} catch {",
+					"  Write-Output 'hardlink-write-denied'",
+					"  exit 29",
+					"}",
+				].join("\n"),
+			});
+			expect(hardlinkAttempt.exitCode).toBe(29);
+			expect(hardlinkAttempt.stdout).toContain("hardlink-write-denied");
+			expect(await readFile(workspaceHardlink, "utf8")).toBe("cache-safe\n");
+			expect(await readFile(outsideHardlinkTarget, "utf8")).toBe(
+				"cache-safe\n",
 			);
 
 			const outsideAttempt = await sandbox.runPowerShell({
@@ -134,6 +165,24 @@ integrationTest(
 			expect(environmentAttempt.exitCode).toBe(0);
 			expect(environmentAttempt.stdout).toContain("environment-redacted");
 			expect(environmentAttempt.stdout).not.toContain(environmentSecret);
+
+			process.env.CAGENT_E2E_SECRET = environmentSecret;
+			const fullAccess = await sandbox.runPowerShell({
+				executionMode: "danger_full_access",
+				command: [
+					`Set-Content -LiteralPath ${powerShellLiteral(fullAccessOutput)} -Value 'host-write' -ErrorAction Stop`,
+					"Write-Output $env:CAGENT_E2E_SECRET",
+				].join("\n"),
+			});
+			restoreEnvironment("CAGENT_E2E_SECRET", previousSecret);
+			expect(fullAccess.exitCode).toBe(0);
+			expect(fullAccess.stdout).toContain(environmentSecret);
+			expect(fullAccess.enforcement).toEqual({
+				filesystem: "unrestricted",
+				process_tree: "job_members_kill_on_close",
+				network: "inherited_unrestricted",
+			});
+			expect(await readFile(fullAccessOutput, "utf8")).toContain("host-write");
 
 			const truncatingSandbox = await WindowsSandbox.create(workspace, {
 				helperPath,

@@ -46,6 +46,7 @@ use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
 use windows_sys::Win32::System::Threading::CREATE_UNICODE_ENVIRONMENT;
 use windows_sys::Win32::System::Threading::CreateProcessAsUserW;
+use windows_sys::Win32::System::Threading::CreateProcessW;
 use windows_sys::Win32::System::Threading::DeleteProcThreadAttributeList;
 use windows_sys::Win32::System::Threading::EXTENDED_STARTUPINFO_PRESENT;
 use windows_sys::Win32::System::Threading::GetExitCodeProcess;
@@ -126,7 +127,7 @@ impl ParentProcess {
 
 pub struct ProcessSpec<'a> {
     pub parent: &'a ParentProcess,
-    pub token: HANDLE,
+    pub token: Option<HANDLE>,
     pub executable: &'a Path,
     pub args: &'a [String],
     pub cwd: &'a Path,
@@ -174,7 +175,7 @@ pub fn run(spec: ProcessSpec<'_>) -> Result<ProcessOutput, RunError> {
     startup.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
     // PowerShell can exit with STATUS_DLL_INIT_FAILED when a restricted token
     // is launched without an explicit desktop. Keep this buffer alive through
-    // CreateProcessAsUserW and use the caller's interactive desktop.
+    // process creation and use the caller's interactive desktop in both modes.
     let mut desktop = to_wide_nul(OsStr::new(r"Winsta0\Default"));
     startup.StartupInfo.lpDesktop = desktop.as_mut_ptr();
     startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
@@ -192,26 +193,46 @@ pub fn run(spec: ProcessSpec<'_>) -> Result<ProcessOutput, RunError> {
         | CREATE_SUSPENDED
         | CREATE_UNICODE_ENVIRONMENT
         | EXTENDED_STARTUPINFO_PRESENT;
-    let created = unsafe {
-        CreateProcessAsUserW(
-            spec.token,
-            application.as_ptr(),
-            command_line.as_mut_ptr(),
-            ptr::null(),
-            ptr::null(),
-            1,
-            creation_flags,
-            environment.as_ptr() as *const c_void,
-            cwd.as_ptr(),
-            &startup.StartupInfo,
-            &mut process_info,
-        )
+    let (created, create_process_api) = unsafe {
+        match spec.token {
+            Some(token) => (
+                CreateProcessAsUserW(
+                    token,
+                    application.as_ptr(),
+                    command_line.as_mut_ptr(),
+                    ptr::null(),
+                    ptr::null(),
+                    1,
+                    creation_flags,
+                    environment.as_ptr() as *const c_void,
+                    cwd.as_ptr(),
+                    &startup.StartupInfo,
+                    &mut process_info,
+                ),
+                "CreateProcessAsUserW",
+            ),
+            None => (
+                CreateProcessW(
+                    application.as_ptr(),
+                    command_line.as_mut_ptr(),
+                    ptr::null(),
+                    ptr::null(),
+                    1,
+                    creation_flags,
+                    environment.as_ptr() as *const c_void,
+                    cwd.as_ptr(),
+                    &startup.StartupInfo,
+                    &mut process_info,
+                ),
+                "CreateProcessW",
+            ),
+        }
     };
     if created == 0 {
         return Err(last_error(
             "create_process",
             format!(
-                "CreateProcessAsUserW failed for {}",
+                "{create_process_api} failed for {}",
                 spec.executable.display()
             ),
         ));
@@ -229,7 +250,7 @@ pub fn run(spec: ProcessSpec<'_>) -> Result<ProcessOutput, RunError> {
         drop(process);
         return Err(RunError {
             stage: "create_process".to_owned(),
-            message: "CreateProcessAsUserW returned invalid process handles".to_owned(),
+            message: format!("{create_process_api} returned invalid process handles"),
             windows_error_code: None,
         });
     }
@@ -253,7 +274,9 @@ pub fn run(spec: ProcessSpec<'_>) -> Result<ProcessOutput, RunError> {
         terminate_job_best_effort(job.raw());
         return Err(RunError::at(
             "verify_job_membership",
-            "CreateProcessAsUserW succeeded without placing the suspended process in the required job",
+            format!(
+                "{create_process_api} succeeded without placing the suspended process in the required job"
+            ),
         ));
     }
 

@@ -1,5 +1,5 @@
 import { open, realpath } from "node:fs/promises";
-import { resolve } from "node:path";
+import { basename, isAbsolute, relative, resolve } from "node:path";
 import {
 	ensureMemoryStore,
 	formatMemoryManifest,
@@ -47,7 +47,8 @@ export type MemoryExtractionResult = {
 		| "model_error"
 		| "tool_error"
 		| "index_error"
-		| "validation_error";
+		| "validation_error"
+		| "protocol_error";
 	reasons?: Array<NonNullable<MemoryExtractionResult["reason"]>>;
 };
 
@@ -93,10 +94,12 @@ async function executeMemoryExtraction(params: {
 	let queryError: unknown;
 	let queryPhase: "preflight" | "model" = "preflight";
 	let baselineValidationIssues: { path: string; message: string }[] = [];
+	let memoryDir: string | undefined;
 	const streamedToolErrors: string[] = [];
 	try {
 		signal?.throwIfAborted();
 		const memoryStore = await ensureMemoryStore(state.cwd);
+		memoryDir = memoryStore.memoryDir;
 		const existingMemoryContext = await buildExistingMemoryContext(memoryStore);
 		baselineValidationIssues = await validateMemoryStore(state.cwd);
 		const task = buildMemoryExtractionTask(
@@ -221,6 +224,31 @@ async function executeMemoryExtraction(params: {
 			summary: formatValidationSummary(newValidationIssues),
 		});
 	}
+	const changedTopics = getChangedMemoryTopics(
+		terminal?.state.changedFiles ?? [],
+		state.cwd,
+		memoryDir,
+	);
+	const normalizedAnswer = finalAnswer.trim();
+	if (failures.length === 0 && changedTopics.length === 0) {
+		if (normalizedAnswer !== "NO_MEMORY") {
+			failures.push({
+				reason: "protocol_error",
+				summary:
+					"memory protocol failed: extraction completed without NO_MEMORY or a memory topic write",
+			});
+		}
+	} else if (
+		failures.length === 0 &&
+		changedTopics.length > 0 &&
+		normalizedAnswer === "NO_MEMORY"
+	) {
+		failures.push({
+			reason: "protocol_error",
+			summary:
+				"memory protocol failed: extraction wrote memory topics but returned NO_MEMORY",
+		});
+	}
 
 	if (failures.length > 0) {
 		const reasons = failures
@@ -238,8 +266,43 @@ async function executeMemoryExtraction(params: {
 	return {
 		subAgentSessionId,
 		ok: true,
-		summary: finalAnswer.trim() || "memory extraction completed",
+		summary:
+			changedTopics.length === 0
+				? "NO_MEMORY"
+				: formatSuccessfulExtractionSummary(changedTopics),
 	};
+}
+
+function getChangedMemoryTopics(
+	changedFiles: readonly string[],
+	cwd: string,
+	memoryDir: string | undefined,
+): string[] {
+	if (!memoryDir) {
+		return [];
+	}
+	const topics: string[] = [];
+	for (const file of changedFiles) {
+		const absolute = resolve(cwd, file);
+		const topic = relative(memoryDir, absolute);
+		if (
+			!topic ||
+			topic === ".." ||
+			topic.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) ||
+			isAbsolute(topic) ||
+			isMemoryIndexPath(topic)
+		) {
+			continue;
+		}
+		topics.push(topic.replaceAll("\\", "/"));
+	}
+	return [...new Set(topics)].sort();
+}
+
+function formatSuccessfulExtractionSummary(changedTopics: string[]): string {
+	const names = changedTopics.slice(0, 5).map((topic) => basename(topic));
+	const suffix = changedTopics.length > names.length ? ", …" : "";
+	return `memory updated: ${names.join(", ")}${suffix}`;
 }
 
 export function shouldRequestMemoryExtraction(state: AgentState): boolean {

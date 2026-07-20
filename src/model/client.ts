@@ -13,5 +13,6 @@ export type ModelStreamEvent =
 
 export type ModelClient = {
 	name: string;
+	supportsMemoryExtraction?: boolean;
 	stream(request: ModelRequest): AsyncGenerator<ModelStreamEvent>;
 };

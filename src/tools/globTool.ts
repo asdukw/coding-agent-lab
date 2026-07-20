@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 import { glob } from "glob";
 import { z } from "zod";
+import { hasDangerFullAccess } from "../state";
 import { isSafeWorkspaceReadPath } from "./permissions";
 import { fileResourceAccesses, resolveToolPath } from "./resourceLock";
 import type { Tool } from "./types";
@@ -33,6 +34,7 @@ export const globTool: Tool<Input, Output> = {
 		const cwd = path ?? process.cwd();
 		const state = context?.getState();
 		const workspaceRoot = state?.cwd ?? cwd;
+		const dangerFullAccess = state ? hasDangerFullAccess(state) : false;
 		const discovered = await glob(pattern, { cwd });
 		const safe = await Promise.all(
 			discovered.map((filename) =>
@@ -40,6 +42,7 @@ export const globTool: Tool<Input, Output> = {
 					workspaceRoot,
 					resolve(cwd, filename),
 					state?.toolPermissionContext.agentType,
+					dangerFullAccess,
 				),
 			),
 		);

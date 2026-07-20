@@ -2,8 +2,10 @@ import { z } from "zod";
 import {
 	getWindowsSandbox,
 	getWindowsSandboxWorkspaceRoot,
+	WINDOWS_FULL_ACCESS_NOTICE,
 	WINDOWS_SANDBOX_NETWORK_NOTICE,
 } from "../sandbox";
+import { hasDangerFullAccess } from "../state";
 import {
 	fileResourceAccesses,
 	opaqueToolAccess,
@@ -19,7 +21,7 @@ const shellInputSchema = z.object({
 		.string()
 		.min(1)
 		.max(10_000)
-		.describe("PowerShell command to execute inside the Windows sandbox"),
+		.describe("PowerShell command to execute under the active permission mode"),
 	timeout_ms: z
 		.number()
 		.int()
@@ -39,21 +41,39 @@ export type ShellOutput = {
 	stdout_truncated: boolean;
 	stderr_truncated: boolean;
 	enforcement: {
-		filesystem: "write_restricted_acl";
+		filesystem: "write_restricted_acl" | "unrestricted";
 		process_tree: "job_members_kill_on_close";
-		network: "inherited_not_isolated";
+		network: "inherited_not_isolated" | "inherited_unrestricted";
 	};
 	network_isolated: false;
-	network_notice: typeof WINDOWS_SANDBOX_NETWORK_NOTICE;
+	network_notice: string;
 };
 
 export const shellTool: Tool<ShellInput, ShellOutput> = {
 	name: SHELL_TOOL_NAME,
 	description:
-		"Execute one non-interactive PowerShell command in the native Windows filesystem/process sandbox. Writes are restricted to the fixed workspace. Members assigned to the Windows Job are terminated on timeout or cancellation; brokered processes outside that Job are not covered. Network access is inherited rather than isolated.",
+		"Execute one non-interactive PowerShell command. The active permission mode selects either workspace-restricted filesystem access or explicit host-user filesystem/environment/network authority. In both modes, members assigned to the Windows Job are terminated on timeout or cancellation; brokered processes outside that Job are not covered.",
 	inputSchema: shellInputSchema,
 	async getResourceAccesses(_input, context) {
-		const cwd = requireContext(context).getState().cwd;
+		const state = requireContext(context).getState();
+		if (hasDangerFullAccess(state)) {
+			const workspaceAccesses = await fileResourceAccesses(
+				state.cwd,
+				"write",
+				"subtree",
+			);
+			return [
+				...workspaceAccesses,
+				{
+					namespace: "runtime",
+					key: SANDBOX_RUNTIME_RESOURCE,
+					mode: "write",
+					scope: "exact",
+				} satisfies ResourceAccess,
+				opaqueToolAccess(),
+			];
+		}
+		const cwd = state.cwd;
 		const workspaceRoot = getWindowsSandboxWorkspaceRoot(cwd);
 		const workspaceAccesses = await fileResourceAccesses(
 			workspaceRoot,
@@ -71,10 +91,14 @@ export const shellTool: Tool<ShellInput, ShellOutput> = {
 	async call({ command, timeout_ms }, context) {
 		const toolContext = requireContext(context);
 		const state = toolContext.getState();
+		const dangerFullAccess = hasDangerFullAccess(state);
 		const sandbox = await getWindowsSandbox(state.cwd);
 		const result = await sandbox.runPowerShell({
 			command,
 			cwd: state.cwd,
+			executionMode: dangerFullAccess
+				? "danger_full_access"
+				: "workspace_write",
 			timeoutMs: timeout_ms,
 			signal: toolContext.signal,
 		});
@@ -87,7 +111,9 @@ export const shellTool: Tool<ShellInput, ShellOutput> = {
 			stderr_truncated: result.stderrTruncated,
 			enforcement: result.enforcement,
 			network_isolated: false,
-			network_notice: WINDOWS_SANDBOX_NETWORK_NOTICE,
+			network_notice: dangerFullAccess
+				? WINDOWS_FULL_ACCESS_NOTICE
+				: WINDOWS_SANDBOX_NETWORK_NOTICE,
 		};
 	},
 };

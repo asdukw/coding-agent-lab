@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { glob } from "glob";
 import { z } from "zod";
+import { hasDangerFullAccess } from "../state";
 import { isSafeWorkspaceReadPath } from "./permissions";
 import { fileResourceAccesses, resolveToolPath } from "./resourceLock";
 import type { Tool } from "./types";
@@ -54,6 +55,7 @@ export const grepTool: Tool<Input, Output> = {
 		const cwd = path ?? process.cwd();
 		const state = context?.getState();
 		const workspaceRoot = state?.cwd ?? cwd;
+		const dangerFullAccess = state ? hasDangerFullAccess(state) : false;
 		const regex = new RegExp(pattern, ignore_case ? "i" : "");
 		const discovered = await glob(globFilter ?? "**/*", {
 			cwd,
@@ -66,6 +68,7 @@ export const grepTool: Tool<Input, Output> = {
 					workspaceRoot,
 					resolve(cwd, file),
 					state?.toolPermissionContext.agentType,
+					dangerFullAccess,
 				),
 			),
 		);

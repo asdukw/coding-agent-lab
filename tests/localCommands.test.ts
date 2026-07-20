@@ -17,6 +17,28 @@ test("parseLocalCommand parses memory commands", () => {
 	});
 });
 
+test("parseLocalCommand parses permissions commands", () => {
+	expect(parseLocalCommand("/permissions")).toEqual({
+		type: "open_permissions",
+	});
+	expect(parseLocalCommand("/permissions ask")).toEqual({
+		type: "set_permissions",
+		mode: "ask",
+	});
+	expect(parseLocalCommand("/permissions auto")).toEqual({
+		type: "set_permissions",
+		mode: "auto",
+	});
+	expect(parseLocalCommand("/permissions full")).toEqual({
+		type: "set_permissions",
+		mode: "full_access",
+	});
+	expect(parseLocalCommand("/permissions unsafe")).toEqual({
+		type: "invalid",
+		message: "usage: /permissions [ask|auto|full]",
+	});
+});
+
 test("parseLocalCommand parses resume commands", () => {
 	expect(parseLocalCommand("/resume session-1")).toEqual({
 		type: "resume",

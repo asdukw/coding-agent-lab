@@ -153,6 +153,40 @@ test("resume slash command restores a saved session", async () => {
 	}
 });
 
+test("permissions command opens the picker and supports direct mode changes", async () => {
+	const cwd = await makeTempDir();
+	const lifecycle = createAppLifecycle();
+	const { lastFrame, stdin, unmount } = render(
+		<App
+			cwd={cwd}
+			model={new StubModelClient()}
+			enableMemoryExtraction={false}
+			lifecycle={lifecycle}
+		/>,
+	);
+
+	try {
+		await waitForInputReady(lastFrame, "Type a message and press Enter...");
+		stdin.write("/permissions");
+		stdin.write("\r");
+		await waitForFrame(lastFrame, "How should cagent actions be approved?");
+		expect(lastFrame()).toContain("Approve for me");
+
+		stdin.write("2");
+		await waitForFrame(lastFrame, "permissions: auto");
+		expect(lastFrame()).toContain(
+			"Automatically allow bounded workspace edits",
+		);
+
+		await waitForInputReady(lastFrame, "Type a message and press Enter...");
+		stdin.write("/permissions full");
+		stdin.write("\r");
+		await waitForFrame(lastFrame, "permissions: full_access");
+	} finally {
+		await cleanupApp(unmount, lifecycle, cwd);
+	}
+});
+
 class FailingModelClient implements ModelClient {
 	readonly name = "failing";
 	called = false;
@@ -401,6 +435,7 @@ test("tool approval prompt resumes the original call after allow", async () => {
 class BackgroundAgentModelClient implements ModelClient {
 	readonly name = "background-agent";
 	readonly childEntered = deferredSignal();
+	readonly childAborted = deferredSignal();
 	readonly releaseChild = deferredSignal();
 	readonly mainRequests: ModelRequest[] = [];
 	private mainCallCount = 0;
@@ -414,6 +449,12 @@ class BackgroundAgentModelClient implements ModelClient {
 			)
 		) {
 			this.childEntered.resolve();
+			const recordAbort = () => this.childAborted.resolve();
+			if (request.signal?.aborted) {
+				recordAbort();
+			} else {
+				request.signal?.addEventListener("abort", recordAbort, { once: true });
+			}
 			await this.releaseChild.promise;
 			yield { type: "text_delta", content: "child investigation complete" };
 			return;
@@ -496,6 +537,69 @@ test("background completion wakes an idle main agent exactly once", async () => 
 			"child investigation complete",
 		);
 	} finally {
+		await cleanupApp(unmount, lifecycle, cwd);
+	}
+});
+
+test("permission mode changes wait for active background agents to stop", async () => {
+	const cwd = await makeTempDir();
+	const model = new BackgroundAgentModelClient();
+	const lifecycle = createAppLifecycle();
+	const initialState = createInitialState("parent", cwd);
+	initialState.toolPermissionContext.sessionAllowedTools = ["Write"];
+	const { lastFrame, stdin, unmount } = render(
+		<App
+			cwd={cwd}
+			model={model}
+			initialState={initialState}
+			enableMemoryExtraction={false}
+			lifecycle={lifecycle}
+		/>,
+	);
+
+	try {
+		await waitForInputReady(lastFrame, "Type a message and press Enter...");
+		stdin.write("delegate this");
+		await waitForInputValue(
+			lastFrame,
+			"delegate this",
+			"Type a message and press Enter...",
+		);
+		stdin.write("\r");
+		await waitForSignal(
+			model.childEntered.promise,
+			lastFrame,
+			"child did not start",
+		);
+		await waitForFrame(lastFrame, [
+			"main is idle while child runs",
+			"Type a message and press Enter...",
+		]);
+
+		stdin.write("/permissions auto");
+		await waitForInputValue(
+			lastFrame,
+			"/permissions auto",
+			"Type a message and press Enter...",
+		);
+		stdin.write("\r");
+		await waitForSignal(
+			model.childAborted.promise,
+			lastFrame,
+			"permission change did not cancel the child",
+		);
+		await waitForFrame(
+			lastFrame,
+			"Stopping active sub-agents before changing permissions...",
+		);
+		expect(lastFrame()).toContain("permissions: ask");
+		expect(lastFrame()).not.toContain("Type a message and press Enter...");
+
+		model.releaseChild.resolve();
+		await waitForFrame(lastFrame, "permissions: auto");
+		await waitForInputReady(lastFrame, "Type a message and press Enter...");
+	} finally {
+		model.releaseChild.resolve();
 		await cleanupApp(unmount, lifecycle, cwd);
 	}
 });

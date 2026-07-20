@@ -360,6 +360,7 @@ export async function* query({
 
 			if (
 				enableMemoryExtraction &&
+				model.supportsMemoryExtraction !== false &&
 				!queryHadToolCalls &&
 				shouldRequestMemoryExtraction(state)
 			) {

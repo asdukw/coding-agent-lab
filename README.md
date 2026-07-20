@@ -91,6 +91,9 @@ C:\path\to\CodingAgentLab\cagent.exe "分析当前仓库"
 
 ### 权限与持久化
 
+- `/permissions` 将审批策略与沙箱策略组合成三档预设：`ask` 对文件修改、Shell 与 MCP 逐次询问；`auto` 自动批准 workspace 内的文件修改，但在网络尚未隔离的 Windows Shell 和外部 MCP 前仍询问；`full` 同时关闭交互审批与文件系统沙箱。
+- `ask` 与 `auto` 保留 workspace、`.env*` / `.git`、Sub-agent 和 Windows Sandbox 边界；`full` 使用宿主用户的文件、环境变量和网络权限，属于显式危险模式。默认模式为 `ask`。
+- 切换权限模式会先取消并等待当前 Session 的活跃 Sub-agent 全部停止，再使新策略生效；旧模式下的 Session 工具授权不会跨模式保留。
 - 危险工具整批暂停，支持单次允许、进程会话允许和拒绝。
 - 文件工具限制在规范化 workspace 内，并保护 `.env*`、`.git` 与 Agent 控制数据。
 - 项目级 `AGENTS.md` / `CLAUDE.md` 指令发现、层级覆盖与大小限制。
@@ -102,7 +105,8 @@ C:\path\to\CodingAgentLab\cagent.exe "分析当前仓库"
 
 - TypeScript 控制面通过有界 JSON 协议调用独立 Rust runner。
 - Restricted Token、路径作用域 Capability ACL、Job Object 与继承句柄白名单。
-- 环境变量白名单、有界 stdout/stderr、超时与普通子进程树清理。
+- workspace 中的硬链接会按当前沙箱 SID 自动降为只读，而不会阻止无关 Shell 命令启动；这兼容 Bun 的全局缓存硬链接，同时避免通过 workspace 别名修改缓存实体。
+- 受限模式使用环境变量白名单，Full Access 继承宿主环境；两种模式都保留有界 stdout/stderr、超时与普通子进程树清理。
 - Windows CI 直接运行 Release runner，验证允许写入与拒绝写入两侧行为。
 
 ## 架构
@@ -126,13 +130,13 @@ flowchart LR
 
     subgraph Native["Rust / Win32 数据面"]
         Client -->|bounded JSON over stdio| Runner[Native Runner]
-        Runner -->|Restricted Token + Job Object| PowerShell[PowerShell Process Tree]
+        Runner -->|Restricted Token or host token + Job Object| PowerShell[PowerShell Process Tree]
     end
 
     MCPAdapter -->|stdio| MCP[MCP Server]
     Files --> Workspace[Workspace]
     Runner -->|install persistent capability ACL| Workspace
-    PowerShell -->|write permitted by capability ACL| Workspace
+    PowerShell -->|bounded or explicit full-access write| Workspace
 ```
 
 这条链路也是项目的主要学习主线：
@@ -213,6 +217,8 @@ bun run start "分析当前仓库并给出下一步计划"
 | 输入 | 作用 |
 | --- | --- |
 | `/plan` | 进入 Plan Mode，计划获批前不执行修改 |
+| `/permissions` | 打开权限模式选择器；支持方向键、数字键与回车选择 |
+| `/permissions ask\|auto\|full` | 直接切换权限模式 |
 | `/resume <session-id>` | 恢复指定 Session |
 | `/memory` | 初始化并显示当前 workspace 的 Memory Store |
 | `approve` | 批准待执行计划 |
@@ -221,7 +227,7 @@ bun run start "分析当前仓库并给出下一步计划"
 | `always` | 在当前进程会话内批准对应工具 |
 | `deny` | 拒绝当前危险工具调用 |
 
-`always` 授权不会写入 Session；恢复会话后，待审批调用也必须重新校验。
+权限模式与 `always` 授权都不会写入 Session；恢复会话时回到 `ask`，待审批调用也必须重新校验。切换权限模式会清除已有的进程级授权和待审批决定。
 
 ## MCP 配置
 

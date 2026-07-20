@@ -59,6 +59,7 @@ use windows_sys::Win32::Security::TokenGroups;
 use windows_sys::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION;
 use windows_sys::Win32::Storage::FileSystem::CreateFileW;
 use windows_sys::Win32::Storage::FileSystem::DELETE;
+use windows_sys::Win32::Storage::FileSystem::FILE_APPEND_DATA;
 use windows_sys::Win32::Storage::FileSystem::FILE_DELETE_CHILD;
 use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
 use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_EXECUTE;
@@ -68,6 +69,9 @@ use windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_DELETE;
 use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
 use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE;
+use windows_sys::Win32::Storage::FileSystem::FILE_WRITE_ATTRIBUTES;
+use windows_sys::Win32::Storage::FileSystem::FILE_WRITE_DATA;
+use windows_sys::Win32::Storage::FileSystem::FILE_WRITE_EA;
 use windows_sys::Win32::Storage::FileSystem::GetFileInformationByHandle;
 use windows_sys::Win32::Storage::FileSystem::OPEN_EXISTING;
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
@@ -211,14 +215,19 @@ pub fn file_link_count(path: &Path) -> Result<u32> {
 }
 
 pub fn deny_write_access(path: &Path, sids: &[LocalSid]) -> Result<()> {
+    // Do not deny FILE_GENERIC_WRITE here. Its standard-rights expansion
+    // overlaps FILE_GENERIC_READ (notably READ_CONTROL and SYNCHRONIZE), which
+    // can make protected and multi-link files unreadable. Deny only the
+    // concrete file/directory mutation rights; FILE_WRITE_DATA and
+    // FILE_APPEND_DATA also represent add-file/add-subdirectory on directories.
+    let mutation_mask = FILE_WRITE_DATA
+        | FILE_APPEND_DATA
+        | FILE_WRITE_EA
+        | FILE_WRITE_ATTRIBUTES
+        | DELETE
+        | FILE_DELETE_CHILD;
     for sid in sids {
-        set_path_ace(
-            path,
-            sid,
-            DENY_ACCESS,
-            FILE_GENERIC_WRITE | DELETE | FILE_DELETE_CHILD,
-            None,
-        )?;
+        set_path_ace(path, sid, DENY_ACCESS, mutation_mask, None)?;
     }
     Ok(())
 }

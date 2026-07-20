@@ -4,10 +4,12 @@ import { realpath, stat } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import {
+	WINDOWS_FULL_ACCESS_NOTICE,
 	WINDOWS_SANDBOX_NETWORK_NOTICE,
 	WINDOWS_SANDBOX_PROTOCOL_VERSION,
 	type WindowsSandboxEnforcement,
 	type WindowsSandboxErrorPayload,
+	type WindowsSandboxExecutionMode,
 	type WindowsSandboxExecutor,
 	type WindowsSandboxNativeRequest,
 	type WindowsSandboxNativeResponse,
@@ -34,6 +36,7 @@ const REQUEST_KEYS = new Set([
 	"version",
 	"request_id",
 	"parent_pid",
+	"execution_mode",
 	"args",
 	"cwd",
 	"writable_roots",
@@ -283,6 +286,7 @@ export class WindowsSandbox implements WindowsSandboxExecutor {
 				{ stage: "validate_cwd" },
 			);
 		}
+		const executionMode = request.executionMode ?? "workspace_write";
 
 		return sandboxProcessQueue.run(request.signal, async () => {
 			assertSandboxHealthy();
@@ -292,6 +296,7 @@ export class WindowsSandbox implements WindowsSandboxExecutor {
 				version: WINDOWS_SANDBOX_PROTOCOL_VERSION,
 				request_id: requestId,
 				parent_pid: process.pid,
+				execution_mode: executionMode,
 				args: [
 					"-NoLogo",
 					"-NoProfile",
@@ -303,7 +308,10 @@ export class WindowsSandbox implements WindowsSandboxExecutor {
 				],
 				cwd: commandCwd,
 				writable_roots: [this.workspaceRoot],
-				env: { ...this.environment },
+				env:
+					executionMode === "danger_full_access"
+						? hostEnvironment()
+						: { ...this.environment },
 				timeout_ms: timeoutMs,
 				max_output_bytes: this.maxOutputBytes,
 			};
@@ -328,7 +336,10 @@ export class WindowsSandbox implements WindowsSandboxExecutor {
 				stderrTruncated: response.stderr_truncated,
 				enforcement: response.enforcement,
 				networkIsolated: false,
-				networkNotice: WINDOWS_SANDBOX_NETWORK_NOTICE,
+				networkNotice:
+					executionMode === "danger_full_access"
+						? WINDOWS_FULL_ACCESS_NOTICE
+						: WINDOWS_SANDBOX_NETWORK_NOTICE,
 			};
 		});
 	}
@@ -479,6 +490,7 @@ async function executeNativeHelper(options: {
 		const response = parseNativeResponse(
 			stdout.text,
 			options.request.request_id,
+			options.request.execution_mode,
 		);
 		if (response.status === "error") {
 			const error = response.error as WindowsSandboxErrorPayload;
@@ -532,6 +544,7 @@ async function executeNativeHelper(options: {
 function parseNativeResponse(
 	text: string,
 	expectedRequestId: string,
+	expectedExecutionMode: WindowsSandboxExecutionMode,
 ): WindowsSandboxNativeResponse {
 	let value: unknown;
 	try {
@@ -552,7 +565,10 @@ function parseNativeResponse(
 			{ stage: "validate_response" },
 		);
 	}
-	const enforcement = parseEnforcement(response.enforcement);
+	const enforcement = parseEnforcement(
+		response.enforcement,
+		expectedExecutionMode,
+	);
 	const error =
 		response.error === null ? null : parseErrorPayload(response.error);
 	const exitCode =
@@ -593,29 +609,35 @@ function parseNativeResponse(
 	};
 }
 
-function parseEnforcement(value: unknown): WindowsSandboxEnforcement {
+function parseEnforcement(
+	value: unknown,
+	expectedExecutionMode: WindowsSandboxExecutionMode,
+): WindowsSandboxEnforcement {
 	const record = requireRecord(value, "enforcement");
 	assertExactKeys(record, ENFORCEMENT_KEYS, "enforcement");
-	const filesystem = requireEnum(
-		record.filesystem,
-		["write_restricted_acl"],
-		"enforcement.filesystem",
-	);
-	const processTree = requireEnum(
-		record.process_tree,
-		["job_members_kill_on_close"],
-		"enforcement.process_tree",
-	);
-	const network = requireEnum(
-		record.network,
-		["inherited_not_isolated"],
-		"enforcement.network",
-	);
-	return {
-		filesystem,
-		process_tree: processTree,
-		network,
-	};
+	const expected: WindowsSandboxEnforcement =
+		expectedExecutionMode === "danger_full_access"
+			? {
+					filesystem: "unrestricted",
+					process_tree: "job_members_kill_on_close",
+					network: "inherited_unrestricted",
+				}
+			: {
+					filesystem: "write_restricted_acl",
+					process_tree: "job_members_kill_on_close",
+					network: "inherited_not_isolated",
+				};
+	if (
+		record.filesystem !== expected.filesystem ||
+		record.process_tree !== expected.process_tree ||
+		record.network !== expected.network
+	) {
+		throw new WindowsSandboxError(
+			`enforcement does not match execution mode ${expectedExecutionMode}.`,
+			{ stage: "validate_response" },
+		);
+	}
+	return expected;
 }
 
 function parseErrorPayload(value: unknown): WindowsSandboxErrorPayload {
@@ -723,7 +745,17 @@ function sanitizedEnvironment(): Record<string, string> {
 			environment[key] = value;
 		}
 	}
-	environment.CAGENT_SANDBOX = "windows-v1";
+	environment.CAGENT_SANDBOX = "windows-v2";
+	return environment;
+}
+
+function hostEnvironment(): Record<string, string> {
+	const environment: Record<string, string> = {};
+	for (const [key, value] of Object.entries(process.env)) {
+		if (value !== undefined && !key.includes("\0") && !value.includes("\0")) {
+			environment[key] = value;
+		}
+	}
 	return environment;
 }
 
@@ -953,6 +985,14 @@ function assertNativeRequest(
 	) {
 		throwInvalidNativeRequest(
 			"sandbox parent_pid must be a positive 32-bit integer",
+		);
+	}
+	if (
+		request.execution_mode !== "workspace_write" &&
+		request.execution_mode !== "danger_full_access"
+	) {
+		throwInvalidNativeRequest(
+			"sandbox execution_mode must be workspace_write or danger_full_access",
 		);
 	}
 	assertStringArray(request.args, "sandbox args");

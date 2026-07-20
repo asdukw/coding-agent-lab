@@ -916,6 +916,7 @@ function validatePermissionContext(value: unknown, label: string): void {
 		["mode"],
 		[
 			"agentType",
+			"approvalMode",
 			"writePolicy",
 			"sessionAllowedTools",
 			"prePlanMode",
@@ -934,6 +935,14 @@ function validatePermissionContext(value: unknown, label: string): void {
 		context.agentType !== "subagent"
 	) {
 		throw new Error(`${label} toolPermissionContext.agentType is invalid`);
+	}
+	if (
+		context.approvalMode !== undefined &&
+		context.approvalMode !== "ask" &&
+		context.approvalMode !== "auto" &&
+		context.approvalMode !== "full_access"
+	) {
+		throw new Error(`${label} toolPermissionContext.approvalMode is invalid`);
 	}
 	if (context.sessionAllowedTools !== undefined) {
 		validateStringArray(
@@ -1405,6 +1414,8 @@ function restoredPermissionContext(
 	return {
 		mode: context.mode === "plan" ? "plan" : "normal",
 		agentType: "main",
+		// Approval policy is process-local authority and cannot be restored.
+		approvalMode: "ask",
 		// The trusted caller cwd supplies a fresh workspace-bound default policy.
 		writePolicy: undefined,
 		// Session files live in the writable workspace and cannot grant approval.
@@ -1436,6 +1447,8 @@ function persistableToolPermissionContext(
 	const pending = context.pendingToolApproval;
 	return {
 		...context,
+		// Persist only the safe default, never a less restrictive process choice.
+		approvalMode: "ask",
 		// These grants are process-local and must not become durable authority.
 		sessionAllowedTools: [],
 		pendingToolApproval: pending

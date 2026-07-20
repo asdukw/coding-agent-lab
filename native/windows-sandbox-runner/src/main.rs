@@ -3,6 +3,7 @@ mod protocol;
 #[cfg(windows)]
 mod windows;
 
+use protocol::EnforcementSummary;
 use protocol::MAX_REQUEST_BYTES;
 use protocol::PROTOCOL_VERSION;
 use protocol::SandboxRequest;
@@ -30,6 +31,7 @@ fn run() -> SandboxResponse {
         Err(response) => return *response,
     };
     let request_id = request.request_id.clone();
+    let enforcement = EnforcementSummary::for_execution_mode(request.execution_mode);
 
     #[cfg(windows)]
     {
@@ -42,12 +44,14 @@ fn run() -> SandboxResponse {
                 result.timed_out,
                 result.stdout_truncated,
                 result.stderr_truncated,
+                enforcement,
             ),
-            Err(error) => SandboxResponse::error(
+            Err(error) => SandboxResponse::error_with_enforcement(
                 request_id,
                 error.stage,
                 error.message,
                 error.windows_error_code,
+                enforcement,
             ),
         }
     }
@@ -55,11 +59,12 @@ fn run() -> SandboxResponse {
     #[cfg(not(windows))]
     {
         let _ = request;
-        SandboxResponse::error(
+        SandboxResponse::error_with_enforcement(
             request_id,
             "platform",
             "the native sandbox runner only supports Windows",
             None,
+            enforcement,
         )
     }
 }
@@ -121,6 +126,7 @@ mod tests {
             "version": PROTOCOL_VERSION,
             "request_id": "request-1",
             "parent_pid": 1,
+            "execution_mode": "workspace_write",
             "args": [],
             "cwd": "C:/workspace",
             "writable_roots": ["C:/workspace"],
@@ -172,8 +178,8 @@ mod tests {
     #[test]
     fn duplicate_field_is_a_parse_error() {
         let request = br#"{
-            "version": 1,
-            "version": 1,
+            "version": 2,
+            "version": 2,
             "request_id": "request-1",
             "parent_pid": 1,
             "cwd": "C:/workspace",

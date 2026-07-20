@@ -2,6 +2,7 @@ mod handle;
 mod process;
 mod security;
 
+use crate::protocol::ExecutionMode;
 use crate::protocol::MAX_WRITABLE_ROOTS;
 use crate::protocol::SandboxRequest;
 use process::ProcessSpec;
@@ -85,6 +86,34 @@ pub fn run(request: SandboxRequest) -> Result<RunResult, RunError> {
     let parent = process::ParentProcess::open(request.parent_pid)?;
     let executable = trusted_powershell_executable()?;
     let cwd = canonical_directory(Path::new(&request.cwd), "cwd")?;
+
+    if matches!(request.execution_mode, ExecutionMode::DangerFullAccess) {
+        // Full access deliberately skips every filesystem sandboxing step: no
+        // writable-root ACLs, temporary profile, or restricted token. Keep the
+        // trusted executable check and the native process boundary so the
+        // command still starts suspended with an explicit handle list, is
+        // atomically assigned to the kill-on-close Job, and remains subject to
+        // the same parent monitoring, timeout, and bounded-output behavior.
+        let output = process::run(ProcessSpec {
+            parent: &parent,
+            token: None,
+            executable: &executable,
+            args: &request.args,
+            cwd: &cwd,
+            env: &request.env,
+            timeout_ms: request.timeout_ms,
+            max_output_bytes: request.max_output_bytes,
+        })?;
+        return Ok(RunResult {
+            exit_code: output.exit_code,
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            timed_out: output.timed_out,
+            stdout_truncated: output.stdout_truncated,
+            stderr_truncated: output.stderr_truncated,
+        });
+    }
+
     let writable_roots = canonical_writable_roots(&request.writable_roots)?;
     if !writable_roots.iter().any(|root| path_is_within(&cwd, root)) {
         return Err(RunError::validation(format!(
@@ -121,7 +150,7 @@ pub fn run(request: SandboxRequest) -> Result<RunResult, RunError> {
                 ),
             )
         })?;
-        validate_workspace_tree(root, !installed, &parent)?;
+        validate_workspace_tree(root, !installed, sid, &parent)?;
         if installed {
             // Do not call SetNamedSecurityInfo again: even replacing an
             // equivalent inheritable ACE can re-propagate onto hardlinks or
@@ -184,7 +213,7 @@ pub fn run(request: SandboxRequest) -> Result<RunResult, RunError> {
     profile.apply_environment(&mut environment)?;
     let output = process::run(ProcessSpec {
         parent: &parent,
-        token: token.raw(),
+        token: Some(token.raw()),
         executable: &executable,
         args: &request.args,
         cwd: &cwd,
@@ -506,6 +535,7 @@ fn materialize_cagent_directories(
 fn validate_workspace_tree(
     root: &Path,
     reject_reparse_points: bool,
+    workspace_sid: &LocalSid,
     parent: &process::ParentProcess,
 ) -> Result<(), RunError> {
     let mut pending = vec![root.to_owned()];
@@ -606,13 +636,27 @@ fn validate_workspace_tree(
                     )
                 })?;
                 if links > 1 {
-                    return Err(RunError::at(
-                        "validate_workspace_tree",
-                        format!(
-                            "workspace contains a multi-link file (links={links}): {}",
-                            path.display()
-                        ),
-                    ));
+                    // A hardlink shares its security descriptor and file data with
+                    // every alias, including aliases outside the workspace (Bun's
+                    // package cache is a common example). Never propagate the
+                    // workspace write capability onto that shared file. An explicit
+                    // deny for this workspace's synthetic SID wins over the root's
+                    // inherited allow ACE, while normal host-user access is unchanged.
+                    // The linked file remains readable to sandboxed commands, and an
+                    // unrelated hardlink no longer prevents the command from starting.
+                    security::deny_write_access(
+                        &path,
+                        std::slice::from_ref(workspace_sid),
+                    )
+                    .map_err(|error| {
+                        RunError::at(
+                            "protect_workspace_hardlink",
+                            format!(
+                                "failed to make multi-link file read-only (links={links}) {}: {error}",
+                                path.display()
+                            ),
+                        )
+                    })?;
                 }
             }
         }
@@ -1258,6 +1302,7 @@ mod tests {
             version: crate::protocol::PROTOCOL_VERSION,
             request_id: "request-1".to_owned(),
             parent_pid: valid_parent_pid(),
+            execution_mode: ExecutionMode::WorkspaceWrite,
             args: Vec::new(),
             cwd: "C:/workspace".to_owned(),
             writable_roots: vec!["C:/workspace".to_owned()],

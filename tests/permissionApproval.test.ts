@@ -13,10 +13,17 @@ import { loadSession, saveSession } from "../src/sessionStore";
 import {
 	continueState,
 	createInitialState,
+	permissionPolicyForMode,
 	resolveToolApproval,
+	setApprovalMode,
 } from "../src/state";
-import { toolArgumentFingerprint } from "../src/tools/permissions";
+import {
+	getToolPermissionDecision,
+	toolArgumentFingerprint,
+} from "../src/tools/permissions";
+import { shellTool } from "../src/tools/shellTool";
 import type { Tool } from "../src/tools/types";
+import { writeTool } from "../src/tools/writeTool";
 
 async function makeTempDir(): Promise<string> {
 	return mkdtemp(join(tmpdir(), "cagent-permission-"));
@@ -251,6 +258,115 @@ test("protected .env writes are denied without presenting an approval", async ()
 	}
 });
 
+test("approval presets map to bounded automation or explicit full access", async () => {
+	const cwd = await makeTempDir();
+	const outside = await makeTempDir();
+	try {
+		const writeArgs = {
+			file_path: join(cwd, "allowed.txt"),
+			content: "allowed",
+		};
+		const shellArgs = { command: "Write-Output allowed" };
+		const mcpTool: Tool = {
+			name: "mcp__demo__change",
+			description: "Simulated external MCP action",
+			inputSchema: z.object({}),
+			async call() {
+				return { ok: true };
+			},
+		};
+		const base = createInitialState("compare approval modes", cwd);
+
+		expect(
+			await getToolPermissionDecision(base, writeTool, writeArgs),
+		).toMatchObject({ kind: "ask" });
+		expect(
+			await getToolPermissionDecision(base, shellTool, shellArgs),
+		).toMatchObject({ kind: "ask" });
+
+		const auto = setApprovalMode(base, "auto");
+		expect(await getToolPermissionDecision(auto, writeTool, writeArgs)).toEqual(
+			{
+				kind: "allow",
+			},
+		);
+		expect(
+			await getToolPermissionDecision(auto, shellTool, shellArgs),
+		).toMatchObject({ kind: "ask" });
+		expect(await getToolPermissionDecision(auto, mcpTool, {})).toMatchObject({
+			kind: "ask",
+		});
+
+		const fullAccess = setApprovalMode(auto, "full_access");
+		expect(
+			await getToolPermissionDecision(fullAccess, writeTool, writeArgs),
+		).toEqual({ kind: "allow" });
+		expect(
+			await getToolPermissionDecision(fullAccess, shellTool, shellArgs),
+		).toEqual({ kind: "allow" });
+		expect(await getToolPermissionDecision(fullAccess, mcpTool, {})).toEqual({
+			kind: "allow",
+		});
+		expect(
+			await getToolPermissionDecision(fullAccess, writeTool, {
+				file_path: join(cwd, ".env"),
+				content: "explicitly unrestricted",
+			}),
+		).toEqual({ kind: "allow" });
+		expect(
+			await getToolPermissionDecision(fullAccess, writeTool, {
+				file_path: join(outside, "outside.txt"),
+				content: "explicitly unrestricted",
+			}),
+		).toEqual({ kind: "allow" });
+	} finally {
+		await Promise.all([
+			rm(cwd, { recursive: true, force: true }),
+			rm(outside, { recursive: true, force: true }),
+		]);
+	}
+});
+
+test("permission presets keep approval and sandbox policy as separate axes", () => {
+	expect(permissionPolicyForMode("ask")).toEqual({
+		approval: "always_ask",
+		sandbox: "workspace_write",
+	});
+	expect(permissionPolicyForMode("auto")).toEqual({
+		approval: "ask_on_risk",
+		sandbox: "workspace_write",
+	});
+	expect(permissionPolicyForMode("full_access")).toEqual({
+		approval: "never",
+		sandbox: "danger_full_access",
+	});
+});
+
+test("switching approval mode clears temporary grants and pending decisions", () => {
+	const state = createInitialState("switch safely", process.cwd());
+	state.toolPermissionContext.sessionAllowedTools = ["Write"];
+	state.toolPermissionContext.pendingToolApproval = {
+		calls: [],
+		requests: [],
+		decision: "allow_session",
+	};
+
+	const switched = setApprovalMode(state, "auto");
+	expect(switched.toolPermissionContext.approvalMode).toBe("auto");
+	expect(switched.toolPermissionContext.sessionAllowedTools).toEqual([]);
+	expect(switched.toolPermissionContext.pendingToolApproval).toBeUndefined();
+});
+
+test("reapplying the current approval mode preserves session grants", () => {
+	const state = createInitialState("keep grants", process.cwd());
+	state.toolPermissionContext.sessionAllowedTools = ["Write"];
+
+	const unchanged = setApprovalMode(state, "ask");
+	expect(unchanged.toolPermissionContext.sessionAllowedTools).toEqual([
+		"Write",
+	]);
+});
+
 test("project instructions are injected as system context but not persisted", async () => {
 	const cwd = await makeTempDir();
 	try {
@@ -292,11 +408,15 @@ test("project instructions are injected as system context but not persisted", as
 test("session-wide grants are reset when a writable session file is restored", async () => {
 	const cwd = await makeTempDir();
 	try {
-		const state = createInitialState("persist safely", cwd, [], "grant-reset");
+		const state = setApprovalMode(
+			createInitialState("persist safely", cwd, [], "grant-reset"),
+			"full_access",
+		);
 		state.toolPermissionContext.sessionAllowedTools = ["Write", "Shell"];
 		await saveSession(cwd, state);
 
 		const restored = await loadSession(cwd, state.sessionId);
+		expect(restored.toolPermissionContext.approvalMode).toBe("ask");
 		expect(restored.toolPermissionContext.sessionAllowedTools).toEqual([]);
 		expect(restored.toolPermissionContext.writePolicy?.allow).toEqual([cwd]);
 	} finally {

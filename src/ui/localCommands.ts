@@ -1,3 +1,5 @@
+import type { ApprovalMode } from "../state";
+
 export type LocalCommand =
 	| {
 			type: "enter_plan_mode";
@@ -8,6 +10,13 @@ export type LocalCommand =
 	  }
 	| {
 			type: "memory";
+	  }
+	| {
+			type: "open_permissions";
+	  }
+	| {
+			type: "set_permissions";
+			mode: ApprovalMode;
 	  }
 	| {
 			type: "invalid";
@@ -32,6 +41,10 @@ export function parseLocalCommand(input: string): LocalCommand | undefined {
 		return { type: "memory" };
 	}
 
+	if (trimmed === "/permissions") {
+		return { type: "open_permissions" };
+	}
+
 	const [rawName, ...args] = trimmed.split(/\s+/);
 	const name = rawName ?? "";
 
@@ -50,8 +63,32 @@ export function parseLocalCommand(input: string): LocalCommand | undefined {
 		};
 	}
 
+	if (name === "/permissions") {
+		const [mode, ...rest] = args;
+		const normalizedMode = normalizeApprovalMode(mode);
+		if (!normalizedMode || rest.length > 0) {
+			return {
+				type: "invalid",
+				message: "usage: /permissions [ask|auto|full]",
+			};
+		}
+		return { type: "set_permissions", mode: normalizedMode };
+	}
+
 	return {
 		type: "unknown",
 		name,
 	};
+}
+
+function normalizeApprovalMode(
+	value: string | undefined,
+): ApprovalMode | undefined {
+	if (value === "ask" || value === "auto") {
+		return value;
+	}
+	if (value === "full" || value === "full_access") {
+		return "full_access";
+	}
+	return undefined;
 }

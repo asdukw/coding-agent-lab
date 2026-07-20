@@ -48,6 +48,24 @@ export type CompactionState = {
 
 export type AgentMode = "normal" | "plan";
 export type AgentType = "main" | "memory" | "subagent";
+export type ApprovalMode = "ask" | "auto" | "full_access";
+export type ApprovalPolicy = "always_ask" | "ask_on_risk" | "never";
+export type SandboxPolicy = "workspace_write" | "danger_full_access";
+
+export type PermissionPolicy = {
+	approval: ApprovalPolicy;
+	sandbox: SandboxPolicy;
+};
+
+const PERMISSION_POLICIES: Record<ApprovalMode, PermissionPolicy> = {
+	ask: { approval: "always_ask", sandbox: "workspace_write" },
+	auto: { approval: "ask_on_risk", sandbox: "workspace_write" },
+	full_access: { approval: "never", sandbox: "danger_full_access" },
+};
+
+export function permissionPolicyForMode(mode: ApprovalMode): PermissionPolicy {
+	return PERMISSION_POLICIES[mode];
+}
 
 export type PlanItemStatus = "pending" | "in_progress" | "completed";
 
@@ -95,6 +113,7 @@ const consumedToolApprovalDecisionIds = new Set<string>();
 export type ToolPermissionContext = {
 	mode: AgentMode;
 	agentType: AgentType;
+	approvalMode: ApprovalMode;
 	writePolicy?: {
 		allow?: string[];
 		deny?: string[];
@@ -142,6 +161,14 @@ export type AgentState = {
 		reason: TransitionReason;
 	};
 };
+
+export function hasDangerFullAccess(state: AgentState): boolean {
+	return (
+		state.toolPermissionContext.agentType === "main" &&
+		permissionPolicyForMode(state.toolPermissionContext.approvalMode)
+			.sandbox === "danger_full_access"
+	);
+}
 
 export function createSessionId(): string {
 	return randomUUID();
@@ -195,6 +222,7 @@ export function createToolPermissionContext(
 	options: {
 		mode?: AgentMode;
 		agentType?: AgentType;
+		approvalMode?: ApprovalMode;
 		writePolicy?: ToolPermissionContext["writePolicy"];
 		sessionAllowedTools?: string[];
 	} = {},
@@ -202,8 +230,29 @@ export function createToolPermissionContext(
 	return {
 		mode: options.mode ?? "normal",
 		agentType: options.agentType ?? "main",
+		approvalMode: options.approvalMode ?? "ask",
 		writePolicy: options.writePolicy ?? defaultWritePolicy(_cwd),
 		sessionAllowedTools: uniqueStrings(options.sessionAllowedTools ?? []),
+	};
+}
+
+export function setApprovalMode(
+	prev: AgentState,
+	approvalMode: ApprovalMode,
+): AgentState {
+	const state = ensureToolPermissionContext(prev);
+	if (state.toolPermissionContext.approvalMode === approvalMode) {
+		return state;
+	}
+	return {
+		...state,
+		toolPermissionContext: {
+			...state.toolPermissionContext,
+			approvalMode,
+			// A policy switch invalidates grants and decisions made under the old mode.
+			sessionAllowedTools: [],
+			pendingToolApproval: undefined,
+		},
 	};
 }
 
@@ -519,11 +568,16 @@ export function normalizeToolPermissionContext(
 		context?.agentType === "subagent" || context?.agentType === "memory"
 			? context.agentType
 			: "main";
+	const approvalMode =
+		context?.approvalMode === "auto" || context?.approvalMode === "full_access"
+			? context.approvalMode
+			: "ask";
 	return {
 		...defaults,
 		...context,
 		mode,
 		agentType,
+		approvalMode,
 		writePolicy: normalizeWritePolicy(
 			context?.writePolicy,
 			defaults.writePolicy,

@@ -34,6 +34,7 @@ export class InProcessAgentManager implements AgentRuntime {
 	private readonly notified = new Set<string>();
 	private readonly memoryQueued = new Set<string>();
 	private readonly pendingMemory = new Map<string, AgentMemoryUpdate>();
+	private readonly quiescingSessions = new Set<string>();
 	private readonly slots: AgentSlotPool;
 	private closed = false;
 	private shutdownPromise?: Promise<void>;
@@ -79,6 +80,11 @@ export class InProcessAgentManager implements AgentRuntime {
 
 		const id = randomUUID();
 		const rootSessionId = this.rootSessionId(parentState);
+		if (this.quiescingSessions.has(rootSessionId)) {
+			throw new Error(
+				"sub-agent spawning is paused during a permission policy change",
+			);
+		}
 		const agentType = request.agentType ?? "general-purpose";
 		const record: AgentRecord = {
 			id,
@@ -234,6 +240,44 @@ export class InProcessAgentManager implements AgentRuntime {
 		}
 		this.requestCancellation(record, reason);
 		return true;
+	}
+
+	async quiesceForPermissionChange(
+		requesterState: AgentState,
+		reason = "cancelled because the permission policy changed",
+	): Promise<number> {
+		this.assertOpen();
+		if (requesterState.agent.depth !== 0) {
+			throw new Error(
+				"only the root agent can quiesce a session for a permission policy change",
+			);
+		}
+
+		const sessionId = this.rootSessionId(requesterState);
+		if (this.quiescingSessions.has(sessionId)) {
+			throw new Error("permission policy change is already in progress");
+		}
+		this.quiescingSessions.add(sessionId);
+		try {
+			const activeRecords = [...this.records.values()].filter(
+				(record) =>
+					record.sessionId === sessionId && !isTerminal(record.status),
+			);
+			const completions = activeRecords.flatMap((record) => {
+				const running = this.running.get(record.id);
+				return running ? [running.completion] : [];
+			});
+
+			for (const record of activeRecords) {
+				if (record.status !== "cancelling") {
+					this.requestCancellation(record, reason);
+				}
+			}
+			await Promise.all(completions);
+			return activeRecords.length;
+		} finally {
+			this.quiescingSessions.delete(sessionId);
+		}
 	}
 
 	drainMessages(agentId: string): Message[] {

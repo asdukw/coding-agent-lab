@@ -6,7 +6,11 @@ import {
 	resolveContainedWritePath,
 	resolveRealPathForWrite,
 } from "../pathSafety";
-import type { AgentState } from "../state";
+import {
+	type AgentState,
+	hasDangerFullAccess,
+	permissionPolicyForMode,
+} from "../state";
 import {
 	CANCEL_AGENT_TOOL_NAME,
 	LIST_AGENTS_TOOL_NAME,
@@ -142,8 +146,13 @@ export async function isSafeWorkspaceReadPath(
 	workspaceRoot: string,
 	targetPath: string,
 	agentType: AgentState["toolPermissionContext"]["agentType"] = "main",
+	dangerFullAccess = false,
 ): Promise<boolean> {
 	try {
+		if (dangerFullAccess && agentType === "main") {
+			await lstat(targetPath);
+			return true;
+		}
 		const [canonicalRoot, canonicalTarget] = await Promise.all([
 			resolveRealPathForWrite(workspaceRoot),
 			resolveRealPathForWrite(targetPath),
@@ -227,6 +236,10 @@ async function authorizeReadToolCall(
 		throw new Error(`${tool.name} requires a valid ${argumentName}`);
 	}
 	const targetPath = resolvePath(state.cwd, rawPath);
+	if (hasDangerFullAccess(state)) {
+		args[argumentName] = targetPath;
+		return;
+	}
 	const [canonicalRoot, canonicalTarget] = await Promise.all([
 		resolveRealPathForWrite(state.cwd),
 		resolveRealPathForWrite(targetPath),
@@ -283,6 +296,9 @@ async function authorizeWriteToolCall(
 	}
 
 	args.file_path = targetPath;
+	if (hasDangerFullAccess(state)) {
+		return;
+	}
 	const canonicalTarget = await resolveRealPathForWrite(targetPath);
 	const canonicalRoot = await resolveRealPathForWrite(state.cwd);
 	await assertNoMultiHardlink(targetPath, tool.name);
@@ -327,6 +343,17 @@ function requiresInteractiveApproval(state: AgentState, tool: Tool): boolean {
 		state.toolPermissionContext.agentType !== "main"
 	) {
 		return false;
+	}
+	const policy = permissionPolicyForMode(
+		state.toolPermissionContext.approvalMode,
+	);
+	if (policy.approval === "never") {
+		return false;
+	}
+	if (policy.approval === "ask_on_risk") {
+		// The current native sandbox does not isolate network access, so Shell and
+		// opaque MCP calls remain escalation points until that boundary exists.
+		return tool.name === SHELL_TOOL_NAME || isMcpTool(tool);
 	}
 	return (
 		GENERIC_WRITE_TOOL_NAMES.has(tool.name) ||

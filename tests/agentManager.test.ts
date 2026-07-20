@@ -326,6 +326,44 @@ test("cancellation waits for non-cooperative work to quiesce before becoming ter
 	await manager.shutdown();
 });
 
+test("permission changes quiesce active sub-agents and block replacement spawns", async () => {
+	const model = new NonCooperativeModel();
+	const manager = new InProcessAgentManager({ model, getTools: () => [] });
+	const parent = createInitialState("parent", "/repo");
+	parent.toolPermissionContext.sessionAllowedTools = ["Write"];
+	const launched = await manager.spawn(parent, {
+		task: "keep an old session grant alive",
+		runInBackground: true,
+	});
+	await model.entered.promise;
+
+	let quiesced = false;
+	const quiescence = manager
+		.quiesceForPermissionChange(parent, "permission mode changed")
+		.then((count) => {
+			quiesced = true;
+			return count;
+		});
+	await Promise.resolve();
+	expect(manager.list(parent)[0]?.status).toBe("cancelling");
+	expect(quiesced).toBe(false);
+	await expect(
+		manager.spawn(parent, {
+			task: "replace the cancelled agent",
+			runInBackground: true,
+		}),
+	).rejects.toThrow("permission policy change");
+
+	model.release.resolve();
+	expect(await quiescence).toBe(1);
+	expect(await manager.wait(parent, launched.agentId)).toMatchObject({
+		status: "cancelled",
+		error: "permission mode changed",
+	});
+	expect(manager.list(parent)[0]?.status).toBe("cancelled");
+	await manager.shutdown();
+});
+
 test("a cancellation requested during completion wins the terminal race", async () => {
 	const model = new NonCooperativeModel();
 	const manager = new InProcessAgentManager({ model, getTools: () => [] });

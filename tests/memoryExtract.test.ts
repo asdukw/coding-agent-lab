@@ -66,7 +66,10 @@ class MemoryWritingModelClient implements ModelClient {
 	readonly requests: ModelRequest[] = [];
 	private callCount = 0;
 
-	constructor(private readonly cwd: string) {}
+	constructor(
+		private readonly cwd: string,
+		private readonly finalAnswer = "saved preferences.md",
+	) {}
 
 	async *stream(request: ModelRequest): AsyncGenerator<ModelStreamEvent> {
 		this.requests.push(request);
@@ -110,7 +113,7 @@ class MemoryWritingModelClient implements ModelClient {
 			return;
 		}
 
-		yield { type: "text_delta", content: "saved preferences.md" };
+		yield { type: "text_delta", content: this.finalAnswer };
 	}
 }
 
@@ -300,6 +303,17 @@ class NoMemoryModelClient implements ModelClient {
 	}
 }
 
+class UnexpectedNoWriteModelClient implements ModelClient {
+	readonly name = "unexpected-no-write";
+
+	async *stream(): AsyncGenerator<ModelStreamEvent> {
+		yield {
+			type: "text_delta",
+			content: `unexpected raw response ${"sensitive-prompt ".repeat(100)}`,
+		};
+	}
+}
+
 test("memory extraction sub agent can write memory files", async () => {
 	const cwd = await makeTempDir();
 	try {
@@ -341,7 +355,7 @@ test("memory extraction sub agent can write memory files", async () => {
 		expect(result).toEqual({
 			subAgentSessionId: "main-session.memory.1",
 			ok: true,
-			summary: "saved preferences.md",
+			summary: "memory updated: preferences.md",
 		});
 		expect(
 			await readFile(join(getMemoryDir(cwd), "preferences.md"), "utf8"),
@@ -357,6 +371,50 @@ test("memory extraction sub agent can write memory files", async () => {
 		).toContain(
 			"- [User prefers concise answers](preferences.md) (feedback, evolving)",
 		);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("memory extraction rejects a non-protocol response without writes", async () => {
+	const cwd = await makeTempDir();
+	try {
+		const result = await runMemoryExtractionSubAgent({
+			state: memoryState(cwd, "protocol-session"),
+			model: new UnexpectedNoWriteModelClient(),
+		});
+
+		expect(result).toEqual({
+			subAgentSessionId: "protocol-session.memory.1",
+			ok: false,
+			reason: "protocol_error",
+			reasons: ["protocol_error"],
+			summary:
+				"memory protocol failed: extraction completed without NO_MEMORY or a memory topic write",
+		});
+		expect(result.summary).not.toContain("sensitive-prompt");
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("memory extraction replaces an oversized raw reply with a bounded summary", async () => {
+	const cwd = await makeTempDir();
+	try {
+		const result = await runMemoryExtractionSubAgent({
+			state: memoryState(cwd, "bounded-summary-session"),
+			model: new MemoryWritingModelClient(
+				cwd,
+				`sensitive raw response\n${"x".repeat(1_000)}`,
+			),
+		});
+
+		expect(result).toEqual({
+			subAgentSessionId: "bounded-summary-session.memory.1",
+			ok: true,
+			summary: "memory updated: preferences.md",
+		});
+		expect(result.summary).not.toContain("sensitive raw response");
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}
