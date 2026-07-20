@@ -159,7 +159,7 @@ integrationTest(
 			);
 			const timedOut = await sandbox.runPowerShell({
 				command: [
-					"$powershell = Join-Path $env:SystemRoot 'System32\\WindowsPowerShell\\v1.0\\powershell.exe'",
+					"$powershell = Join-Path $PSHOME 'pwsh.exe'",
 					`$child = Start-Process -FilePath $powershell -ArgumentList @('-NoProfile', '-NonInteractive', '-EncodedCommand', '${encodedChild}') -WindowStyle Hidden -PassThru`,
 					"Set-Content -LiteralPath 'child.pid' -Value $child.Id",
 					"Start-Sleep -Seconds 60",

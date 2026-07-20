@@ -109,7 +109,7 @@ $env:DEEPSEEK_MODEL = "deepseek-v4-flash"
 
 ### 3. Windows：构建原生 Sandbox runner
 
-Windows 是当前的主要开发平台。启动 CLI 前需要安装 Rustup 与 Visual Studio 2022 C++ Build Tools，并安装固定 Rust 工具链：
+Windows 是当前的主要开发平台。启动 CLI 前需要安装 PowerShell 7、Rustup 与 Visual Studio 2022 C++ Build Tools，并安装固定 Rust 工具链：
 
 ```powershell
 rustup toolchain install 1.96.0-x86_64-pc-windows-msvc --profile minimal

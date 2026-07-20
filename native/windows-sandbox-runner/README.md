@@ -4,7 +4,7 @@
 
 ## 构建与安装
 
-前置条件：Windows 11 x64、`rustup`、`1.96.0-x86_64-pc-windows-msvc`，以及带 C++ x64 工具链的 Visual Studio 2022 Build Tools/Community。仓库内的 `rust-toolchain.toml` 同时固定该版本及 `rustfmt`、`clippy` 组件。
+前置条件：Windows 11 x64、PowerShell 7、`rustup`、`1.96.0-x86_64-pc-windows-msvc`，以及带 C++ x64 工具链的 Visual Studio 2022 Build Tools/Community。仓库内的 `rust-toolchain.toml` 同时固定该版本及 `rustfmt`、`clippy` 组件。
 
 在仓库根目录运行：
 
@@ -29,7 +29,7 @@ $cargoTargetDir = Join-Path $env:TEMP "cagent-windows-sandbox-runner-target"
 
 ## 执行流程
 
-1. CLI 启动时固定 workspace 根，并校验 helper 的规范路径和文件类型；runner 通过 `GetSystemDirectoryW` 固定解析系统 Windows PowerShell，不接受客户端指定 executable，恢复的 session 也不能动态扩大 workspace 根。
+1. CLI 启动时固定 workspace 根，并校验 helper 的规范路径和文件类型；runner 在 PATH 中查找 PowerShell 7，但只接受规范路径位于系统 Program Files 下的普通文件，不接受客户端指定 executable，恢复的 session 也不能动态扩大 workspace 根。
 2. runner 严格校验协议、带本地盘符的绝对路径、非盘符根、互不重叠的写根，以及位于写根内的 `cwd`。M1 不额外查询 drive type 或证明文件系统一定是 NTFS。
 3. runner 先在 workspace 内安全地实体化 `.cagent`，再为每个写根派生路径作用域 capability SID。每次启动都会拒绝含多硬链接普通文件的 workspace；首次安装根 ACE 时还会拒绝任意已有 reparse point，避免自动继承传播越过路径边界。扫描通过后写入持久、可继承且幂等的 allow ACE；已有 ACE 时跳过重复传播，敏感路径另加 deny ACE。
 4. runner 在首个 workspace 的 `.cagent-sandbox/profiles/` 中逐级校验并创建每请求唯一的临时 profile，单独授予 capability，并覆盖 `USERPROFILE`、`HOME`、`APPDATA`、`LOCALAPPDATA`、`TEMP`、`TMP`、`HOMEDRIVE`、`HOMEPATH`。结束时仅在路径仍规范地位于该 workspace、且未变成 reparse point 时 best-effort 删除。
@@ -85,7 +85,7 @@ M1 也不是保密边界：目标仍可读取当前用户有权读取的文件�
 
 runner 从 stdin 读取不超过 1 MiB 的单个 JSON 请求，并向 stdout 写一个 JSON 响应。协议版本为 `1`。
 
-请求字段：`version`、`request_id`、`parent_pid`、`args`、`cwd`、`writable_roots`、`env`、`timeout_ms`、`max_output_bytes`。`parent_pid` 必须是仍存活且不同于 runner 的宿主进程；目标固定为系统目录中的 `WindowsPowerShell\v1.0\powershell.exe`。
+请求字段：`version`、`request_id`、`parent_pid`、`args`、`cwd`、`writable_roots`、`env`、`timeout_ms`、`max_output_bytes`。`parent_pid` 必须是仍存活且不同于 runner 的宿主进程；目标固定为 PATH 中发现、规范化后位于系统 Program Files 下的 `pwsh.exe`。
 
 响应包含 `status`、退出码、stdout/stderr、超时与截断标记、结构化 Windows 错误，以及协议声明的 enforcement 模式。错误响应也会声明目标模式，它不表示失败前所有 enforcement 步骤都已实际施加。未知字段、版本不匹配、路径或 ACL 校验失败都会 fail closed。
 

@@ -18,9 +18,10 @@ use std::path::Prefix;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::SystemTime;
-use windows_sys::Win32::Foundation::GetLastError;
 use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
-use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
+use windows_sys::Win32::UI::Shell::CSIDL_PROGRAM_FILES;
+use windows_sys::Win32::UI::Shell::SHGFP_TYPE_CURRENT;
+use windows_sys::Win32::UI::Shell::SHGetFolderPathW;
 
 const MIN_TIMEOUT_MS: u64 = 100;
 const MAX_TIMEOUT_MS: u64 = 10 * 60 * 1_000;
@@ -30,7 +31,6 @@ const MAX_ARGUMENTS: usize = 128;
 const MAX_ENVIRONMENT_ENTRIES: usize = 4_096;
 const MAX_REQUEST_ID_BYTES: usize = 128;
 const PROFILE_CREATE_ATTEMPTS: u64 = 64;
-const MAX_SYSTEM_DIRECTORY_UNITS: usize = 32_768;
 
 static PROFILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -302,42 +302,70 @@ fn canonical_file(path: &Path, label: &str) -> Result<PathBuf, RunError> {
 }
 
 fn trusted_powershell_executable() -> Result<PathBuf, RunError> {
-    let mut buffer = vec![0_u16; 260];
-    loop {
-        let copied = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
-        if copied == 0 {
-            let code = unsafe { GetLastError() };
-            return Err(RunError {
-                stage: "resolve_executable".to_owned(),
-                message: format!("GetSystemDirectoryW failed with Windows error {code}"),
-                windows_error_code: Some(code),
-            });
+    let program_files = program_files_directory()?;
+    let search_path = std::env::var_os("PATH").ok_or_else(|| {
+        RunError::at(
+            "resolve_executable",
+            "PowerShell 7 cannot be resolved because PATH is missing",
+        )
+    })?;
+    for directory in std::env::split_paths(&search_path) {
+        let candidate = directory.join("pwsh.exe");
+        let metadata = match std::fs::symlink_metadata(&candidate) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => continue,
+        };
+        // Ignore workspace-planted executables and WindowsApps aliases. A
+        // trusted installation must be a regular file whose canonical path is
+        // inside the system Program Files directory.
+        if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            continue;
         }
-        let copied = copied as usize;
-        if copied < buffer.len() {
-            buffer.truncate(copied);
-            let system_directory = PathBuf::from(OsString::from_wide(&buffer));
-            let powershell = system_directory
-                .join("WindowsPowerShell")
-                .join("v1.0")
-                .join("powershell.exe");
-            return canonical_file(&powershell, "trusted Windows PowerShell").map_err(
-                |mut error| {
-                    error.stage = "resolve_executable".to_owned();
-                    error
-                },
-            );
+        let powershell =
+            canonical_file(&candidate, "trusted PowerShell 7").map_err(|mut error| {
+                error.stage = "resolve_executable".to_owned();
+                error
+            })?;
+        if path_is_within(&powershell, &program_files) {
+            return Ok(powershell);
         }
-        if copied > MAX_SYSTEM_DIRECTORY_UNITS {
-            return Err(RunError::at(
-                "resolve_executable",
-                format!(
-                    "GetSystemDirectoryW requested an unreasonable buffer of {copied} UTF-16 units"
-                ),
-            ));
-        }
-        buffer.resize(copied.saturating_add(1), 0);
     }
+    Err(RunError::at(
+        "resolve_executable",
+        "PowerShell 7 (pwsh.exe) was not found as a regular file beneath Program Files on PATH",
+    ))
+}
+
+fn program_files_directory() -> Result<PathBuf, RunError> {
+    let mut buffer = vec![0_u16; 260];
+    let result = unsafe {
+        SHGetFolderPathW(
+            0,
+            CSIDL_PROGRAM_FILES as i32,
+            0,
+            SHGFP_TYPE_CURRENT as u32,
+            buffer.as_mut_ptr(),
+        )
+    };
+    if result != 0 {
+        return Err(RunError::at(
+            "resolve_executable",
+            format!("SHGetFolderPathW(CSIDL_PROGRAM_FILES) failed with HRESULT 0x{result:08X}"),
+        ));
+    }
+    let length = buffer.iter().position(|unit| *unit == 0).ok_or_else(|| {
+        RunError::at(
+            "resolve_executable",
+            "SHGetFolderPathW returned an unterminated Program Files path",
+        )
+    })?;
+    buffer.truncate(length);
+    let path = PathBuf::from(OsString::from_wide(&buffer));
+    canonical_directory(&path, "Program Files").map_err(|mut error| {
+        error.stage = "resolve_executable".to_owned();
+        error
+    })
 }
 
 fn canonical_directory(path: &Path, label: &str) -> Result<PathBuf, RunError> {
