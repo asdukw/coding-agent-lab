@@ -54,9 +54,8 @@ use windows_sys::Win32::Security::TOKEN_ASSIGN_PRIMARY;
 use windows_sys::Win32::Security::TOKEN_DUPLICATE;
 use windows_sys::Win32::Security::TOKEN_PRIVILEGES;
 use windows_sys::Win32::Security::TOKEN_QUERY;
-use windows_sys::Win32::Security::TOKEN_USER;
 use windows_sys::Win32::Security::TokenDefaultDacl;
-use windows_sys::Win32::Security::TokenUser;
+use windows_sys::Win32::Security::TokenGroups;
 use windows_sys::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION;
 use windows_sys::Win32::Storage::FileSystem::CreateFileW;
 use windows_sys::Win32::Storage::FileSystem::DELETE;
@@ -77,12 +76,19 @@ const DISABLE_MAX_PRIVILEGE: u32 = 0x01;
 const LUA_TOKEN: u32 = 0x04;
 const WRITE_RESTRICTED: u32 = 0x08;
 const GENERIC_ALL: u32 = 0x1000_0000;
+const SE_GROUP_LOGON_ID: u32 = 0xC000_0000;
+const TOKEN_LINKED_TOKEN_CLASS: i32 = 19;
 const ACCESS_ALLOWED_ACE_TYPE: u8 = 0x00;
 const ACCESS_DENIED_ACE_TYPE: u8 = 0x01;
 
 #[repr(C)]
 struct TokenDefaultDaclInfo {
     default_dacl: *mut ACL,
+}
+
+#[repr(C)]
+struct TokenLinkedTokenInfo {
+    linked_token: HANDLE,
 }
 
 #[repr(C)]
@@ -131,6 +137,8 @@ pub fn capability_sid_for_root(root: &Path) -> String {
     // roots, and folding them would collapse two write capabilities into one.
     let normalized = root.to_string_lossy().replace('\\', "/");
     let mut hasher = Sha256::new();
+    // This is a persistent ACL namespace, not the display name. Changing it
+    // would orphan capability ACEs already installed in existing workspaces.
     hasher.update(b"coding-agent-learn/windows-sandbox/v1\0");
     hasher.update(normalized.as_bytes());
     let digest = hasher.finalize();
@@ -466,6 +474,10 @@ pub fn create_restricted_token(
         return Err(anyhow!("at least one capability SID is required"));
     }
     let base = open_current_process_token()?;
+    let mut logon_sid = get_logon_sid(base.raw())?;
+    let everyone_sid = LocalSid::from_string("S-1-1-0")?;
+    let logon_sid_ptr = logon_sid.as_mut_ptr() as *mut c_void;
+    let everyone_sid_ptr = everyone_sid.as_ptr();
     let mut entries: Vec<SID_AND_ATTRIBUTES> = capability_sids
         .iter()
         .map(|sid| SID_AND_ATTRIBUTES {
@@ -473,6 +485,18 @@ pub fn create_restricted_token(
             Attributes: 0,
         })
         .collect();
+    // WRITE_RESTRICTED applies a second access check against this list. Keep
+    // the logon session and Everyone SIDs so DLL initialization, PowerShell
+    // pipelines, and desktop/system objects that use those well-known ACEs
+    // remain usable; capability SIDs still gate filesystem writes.
+    entries.push(SID_AND_ATTRIBUTES {
+        Sid: logon_sid_ptr,
+        Attributes: 0,
+    });
+    entries.push(SID_AND_ATTRIBUTES {
+        Sid: everyone_sid_ptr,
+        Attributes: 0,
+    });
     let mut restricted_token: HANDLE = 0;
     let ok = unsafe {
         CreateRestrictedToken(
@@ -493,12 +517,13 @@ pub fn create_restricted_token(
         }));
     }
     let token = OwnedHandle::new(restricted_token);
-    let mut user_sid = get_user_sid(token.raw())?;
     // Filesystem children inherit the appropriate stable workspace/profile SID
     // from their parent directory. The token default DACL must not stamp every
     // newly created object with all workspace SIDs: a failed profile cleanup
     // would then leave a workspace-capability-writable object outside workspace.
-    let default_dacl_sids = vec![user_sid.as_mut_ptr() as *mut c_void, profile_sid.as_ptr()];
+    // Logon and Everyone keep anonymous kernel objects (including PowerShell
+    // pipes) usable, while only the request-scoped profile capability is added.
+    let default_dacl_sids = vec![logon_sid_ptr, everyone_sid_ptr, profile_sid.as_ptr()];
     set_default_dacl(token.raw(), &default_dacl_sids)?;
     enable_change_notify(token.raw())?;
     Ok(token)
@@ -521,50 +546,108 @@ fn open_current_process_token() -> Result<OwnedHandle> {
     Ok(OwnedHandle::new(token))
 }
 
-fn get_user_sid(token: HANDLE) -> Result<Vec<u8>> {
+fn get_logon_sid(token: HANDLE) -> Result<Vec<u8>> {
+    if let Some(sid) = scan_token_groups_for_logon_sid(token)? {
+        return Ok(sid);
+    }
+
     let mut needed = 0_u32;
     unsafe {
-        GetTokenInformation(token, TokenUser, ptr::null_mut(), 0, &mut needed);
+        GetTokenInformation(
+            token,
+            TOKEN_LINKED_TOKEN_CLASS,
+            ptr::null_mut(),
+            0,
+            &mut needed,
+        );
+    }
+    if needed >= std::mem::size_of::<TokenLinkedTokenInfo>() as u32 {
+        let mut buffer = vec![0_u8; needed as usize];
+        let ok = unsafe {
+            GetTokenInformation(
+                token,
+                TOKEN_LINKED_TOKEN_CLASS,
+                buffer.as_mut_ptr() as *mut c_void,
+                needed,
+                &mut needed,
+            )
+        };
+        if ok != 0 {
+            let linked_info =
+                unsafe { ptr::read_unaligned(buffer.as_ptr() as *const TokenLinkedTokenInfo) };
+            if linked_info.linked_token != 0 {
+                let linked_token = OwnedHandle::new(linked_info.linked_token);
+                if let Some(sid) = scan_token_groups_for_logon_sid(linked_token.raw())? {
+                    return Ok(sid);
+                }
+            }
+        }
+    }
+
+    Err(anyhow!("logon SID is not present on the process token"))
+}
+
+fn scan_token_groups_for_logon_sid(token: HANDLE) -> Result<Option<Vec<u8>>> {
+    let mut needed = 0_u32;
+    unsafe {
+        GetTokenInformation(token, TokenGroups, ptr::null_mut(), 0, &mut needed);
     }
     if needed == 0 {
-        return Err(anyhow!("TokenUser size query failed"));
+        return Err(anyhow!("TokenGroups size query failed"));
     }
-    let mut token_user_buffer = vec![0_u8; needed as usize];
+    let mut buffer = vec![0_u8; needed as usize];
     let ok = unsafe {
         GetTokenInformation(
             token,
-            TokenUser,
-            token_user_buffer.as_mut_ptr() as *mut c_void,
+            TokenGroups,
+            buffer.as_mut_ptr() as *mut c_void,
             needed,
             &mut needed,
         )
     };
     if ok == 0 {
         return Err(anyhow!(
-            "GetTokenInformation(TokenUser) failed: {}",
+            "GetTokenInformation(TokenGroups) failed: {}",
             unsafe { GetLastError() }
         ));
     }
-    let token_user =
-        unsafe { ptr::read_unaligned(token_user_buffer.as_ptr() as *const TOKEN_USER) };
-    let sid_length = unsafe { GetLengthSid(token_user.User.Sid) };
-    if sid_length == 0 {
-        return Err(anyhow!("GetLengthSid(TokenUser) failed"));
+
+    let group_count = unsafe { ptr::read_unaligned(buffer.as_ptr() as *const u32) } as usize;
+    let groups_start = unsafe { buffer.as_ptr().add(std::mem::size_of::<u32>()) } as usize;
+    let alignment = std::mem::align_of::<SID_AND_ATTRIBUTES>();
+    let aligned_start = (groups_start + alignment - 1) & !(alignment - 1);
+    let groups_offset = aligned_start - buffer.as_ptr() as usize;
+    let groups_size = group_count
+        .checked_mul(std::mem::size_of::<SID_AND_ATTRIBUTES>())
+        .ok_or_else(|| anyhow!("TokenGroups entry count overflow"))?;
+    if groups_offset
+        .checked_add(groups_size)
+        .is_none_or(|end| end > buffer.len())
+    {
+        return Err(anyhow!("TokenGroups response is truncated"));
     }
-    let mut sid = vec![0_u8; sid_length as usize];
-    let copied = unsafe {
-        CopySid(
-            sid_length,
-            sid.as_mut_ptr() as *mut c_void,
-            token_user.User.Sid,
-        )
-    };
-    if copied == 0 {
-        return Err(anyhow!("CopySid(TokenUser) failed: {}", unsafe {
-            GetLastError()
-        }));
+
+    let groups = aligned_start as *const SID_AND_ATTRIBUTES;
+    for index in 0..group_count {
+        let entry = unsafe { ptr::read_unaligned(groups.add(index)) };
+        if entry.Attributes & SE_GROUP_LOGON_ID != SE_GROUP_LOGON_ID {
+            continue;
+        }
+        let sid_length = unsafe { GetLengthSid(entry.Sid) };
+        if sid_length == 0 {
+            return Err(anyhow!("GetLengthSid(logon SID) failed: {}", unsafe {
+                GetLastError()
+            }));
+        }
+        let mut sid = vec![0_u8; sid_length as usize];
+        if unsafe { CopySid(sid_length, sid.as_mut_ptr() as *mut c_void, entry.Sid) } == 0 {
+            return Err(anyhow!("CopySid(logon SID) failed: {}", unsafe {
+                GetLastError()
+            }));
+        }
+        return Ok(Some(sid));
     }
-    Ok(sid)
+    Ok(None)
 }
 
 fn set_default_dacl(token: HANDLE, sids: &[*mut c_void]) -> Result<()> {

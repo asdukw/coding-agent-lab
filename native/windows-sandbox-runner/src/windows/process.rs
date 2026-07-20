@@ -172,6 +172,11 @@ pub fn run(spec: ProcessSpec<'_>) -> Result<ProcessOutput, RunError> {
     )?;
     let mut startup: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
     startup.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+    // PowerShell can exit with STATUS_DLL_INIT_FAILED when a restricted token
+    // is launched without an explicit desktop. Keep this buffer alive through
+    // CreateProcessAsUserW and use the caller's interactive desktop.
+    let mut desktop = to_wide_nul(OsStr::new(r"Winsta0\Default"));
+    startup.StartupInfo.lpDesktop = desktop.as_mut_ptr();
     startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
     startup.StartupInfo.hStdInput = inherited_handles[0];
     startup.StartupInfo.hStdOutput = inherited_handles[1];
