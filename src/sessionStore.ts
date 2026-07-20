@@ -567,14 +567,22 @@ function replaySessionEvents(
 	const lines = raw.split(/\r?\n/);
 	const hasTerminatingNewline = /\r?\n$/.test(raw);
 	let parsedEventCount = 0;
+	let metadataSeen = false;
 	for (const [index, line] of lines.entries()) {
 		if (!line.trim()) {
-			continue;
+			const isTerminatingLine =
+				index === lines.length - 1 && line === "" && hasTerminatingNewline;
+			if (isTerminatingLine) {
+				continue;
+			}
+			throw new Error(
+				`invalid session event at line ${index + 1}: empty records are not allowed`,
+			);
 		}
 
-		let event: SessionEvent | LegacySessionEvent;
+		let parsed: unknown;
 		try {
-			event = JSON.parse(line) as SessionEvent | LegacySessionEvent;
+			parsed = JSON.parse(line) as unknown;
 		} catch (caught) {
 			const isIncompleteTail =
 				index === lines.length - 1 &&
@@ -587,9 +595,32 @@ function replaySessionEvents(
 				`invalid session event at line ${index + 1}: ${formatCaught(caught)}`,
 			);
 		}
+		let event: SessionEvent | LegacySessionEvent;
+		try {
+			event = decodeSessionEvent(parsed);
+		} catch (caught) {
+			throw new Error(
+				`invalid session event at line ${index + 1}: ${formatCaught(caught)}`,
+			);
+		}
+		const isMetadata =
+			event.type === "session_meta" || event.type === "session_start";
+		if (parsedEventCount === 0 && !isMetadata) {
+			throw new Error(
+				`invalid session event at line ${index + 1}: first event must contain session metadata`,
+			);
+		}
+		if (isMetadata && metadataSeen) {
+			throw new Error(
+				`invalid session event at line ${index + 1}: duplicate session metadata`,
+			);
+		}
+		metadataSeen ||= isMetadata;
 		parsedEventCount++;
 		if (event.sessionId !== sessionId) {
-			throw new Error(`session id mismatch in event: ${sessionId}`);
+			throw new Error(
+				`invalid session event at line ${index + 1}: session id mismatch; expected ${sessionId}`,
+			);
 		}
 
 		if (isCurrentSessionEvent(event)) {
@@ -619,6 +650,506 @@ function replaySessionEvents(
 	}
 
 	return state;
+}
+
+function decodeSessionEvent(value: unknown): SessionEvent | LegacySessionEvent {
+	const event = requireSessionRecord(value, "session event");
+	const type = requireSessionString(event, "type", "session event");
+
+	if (event.version === 2) {
+		assertSessionKeys(
+			event,
+			["version", "timestamp", "type", "sessionId", "payload"],
+			[],
+			"session event",
+		);
+		requireSessionId(event, "session event");
+		requireSessionTimestamp(event, "timestamp", "session event");
+		const payload = requireSessionRecord(event.payload, `${type} payload`);
+
+		if (type === "session_meta") {
+			assertSessionKeys(payload, ["cwd", "task"], [], `${type} payload`);
+			requireSessionString(payload, "cwd", `${type} payload`);
+			requireSessionString(payload, "task", `${type} payload`);
+		} else if (
+			type === "user_message" ||
+			type === "agent_message" ||
+			type === "assistant_message" ||
+			type === "tool_result"
+		) {
+			assertSessionKeys(payload, ["message"], [], `${type} payload`);
+			const message = validateSessionMessage(
+				payload.message,
+				`${type} payload`,
+			);
+			const allowedRoles: Record<typeof type, Message["role"][]> = {
+				user_message: ["user"],
+				agent_message: ["agent"],
+				assistant_message: ["assistant", "system"],
+				tool_result: ["tool"],
+			};
+			if (!allowedRoles[type].includes(message.role)) {
+				throw new Error(`${type} payload has incompatible message role`);
+			}
+		} else if (type === "tool_call") {
+			assertSessionKeys(
+				payload,
+				["id", "name", "arguments"],
+				[],
+				`${type} payload`,
+			);
+			requireNonEmptySessionString(payload, "id", `${type} payload`);
+			requireNonEmptySessionString(payload, "name", `${type} payload`);
+			requireSessionString(payload, "arguments", `${type} payload`);
+		} else if (type === "state_snapshot") {
+			validateStateSnapshotPayload(payload);
+		} else if (type === "context_compaction") {
+			assertSessionKeys(
+				payload,
+				["messages", "compaction"],
+				[],
+				`${type} payload`,
+			);
+			validateSessionMessageArray(payload.messages, `${type} payload messages`);
+			validateCompaction(payload.compaction, `${type} payload compaction`);
+		} else if (type === "memory_extraction") {
+			validateMemoryExtractionPayload(payload, `${type} payload`);
+		} else {
+			throw new Error(`unsupported session event type: ${type}`);
+		}
+
+		return event as SessionEvent;
+	}
+
+	if (event.version !== undefined && event.version !== 1) {
+		throw new Error(
+			`unsupported session event version: ${String(event.version)}`,
+		);
+	}
+
+	if (type === "session_start") {
+		assertSessionKeys(
+			event,
+			["type", "version", "sessionId", "cwd", "task", "createdAt"],
+			[],
+			"legacy session_start event",
+		);
+		if (event.version !== 1) {
+			throw new Error("legacy session_start event must use version 1");
+		}
+		requireSessionId(event, "legacy session_start event");
+		requireSessionString(event, "cwd", "legacy session_start event");
+		requireSessionString(event, "task", "legacy session_start event");
+		requireSessionTimestamp(event, "createdAt", "legacy session_start event");
+	} else if (type === "message") {
+		assertSessionKeys(
+			event,
+			["type", "sessionId", "message", "createdAt"],
+			[],
+			"legacy message event",
+		);
+		requireSessionId(event, "legacy message event");
+		validateSessionMessage(event.message, "legacy message event");
+		requireSessionTimestamp(event, "createdAt", "legacy message event");
+	} else if (type === "state") {
+		assertSessionKeys(
+			event,
+			[
+				"type",
+				"sessionId",
+				"task",
+				"toolPermissionContext",
+				"plan",
+				"turn",
+				"budget",
+				"savedAt",
+			],
+			[],
+			"legacy state event",
+		);
+		requireSessionId(event, "legacy state event");
+		requireSessionString(event, "task", "legacy state event");
+		validatePermissionContext(
+			event.toolPermissionContext,
+			"legacy state event",
+		);
+		normalizeRestoredPlan(event.plan);
+		requireNonNegativeSessionInteger(event, "turn", "legacy state event");
+		validateBudget(event.budget, "legacy state event budget");
+		requireSessionTimestamp(event, "savedAt", "legacy state event");
+	} else if (type === "memory_extraction") {
+		assertSessionKeys(
+			event,
+			["type", "sessionId", "subAgentSessionId", "ok", "summary", "createdAt"],
+			[],
+			"legacy memory_extraction event",
+		);
+		requireSessionId(event, "legacy memory_extraction event");
+		requireNonEmptySessionString(
+			event,
+			"subAgentSessionId",
+			"legacy memory_extraction event",
+		);
+		requireSessionBoolean(event, "ok", "legacy memory_extraction event");
+		requireSessionString(event, "summary", "legacy memory_extraction event");
+		requireSessionTimestamp(
+			event,
+			"createdAt",
+			"legacy memory_extraction event",
+		);
+	} else {
+		throw new Error(`unsupported legacy session event type: ${type}`);
+	}
+
+	return event as LegacySessionEvent;
+}
+
+function validateStateSnapshotPayload(payload: Record<string, unknown>): void {
+	const label = "state_snapshot payload";
+	assertSessionKeys(
+		payload,
+		["task", "toolPermissionContext", "plan", "turn", "budget", "compaction"],
+		["toolExecutions", "changedFiles"],
+		label,
+	);
+	requireSessionString(payload, "task", label);
+	validatePermissionContext(payload.toolPermissionContext, label);
+	normalizeRestoredPlan(payload.plan);
+	requireNonNegativeSessionInteger(payload, "turn", label);
+	validateBudget(payload.budget, `${label} budget`);
+	validateCompaction(payload.compaction, `${label} compaction`);
+	if (payload.toolExecutions !== undefined) {
+		validateToolExecutions(payload.toolExecutions, `${label} toolExecutions`);
+	}
+	if (payload.changedFiles !== undefined) {
+		validateStringArray(payload.changedFiles, `${label} changedFiles`);
+	}
+}
+
+function validateMemoryExtractionPayload(
+	payload: Record<string, unknown>,
+	label: string,
+): void {
+	assertSessionKeys(
+		payload,
+		["subAgentSessionId", "ok", "summary"],
+		["reason", "reasons"],
+		label,
+	);
+	requireNonEmptySessionString(payload, "subAgentSessionId", label);
+	requireSessionBoolean(payload, "ok", label);
+	requireSessionString(payload, "summary", label);
+	if (payload.reason !== undefined && typeof payload.reason !== "string") {
+		throw new Error(`${label}.reason must be a string`);
+	}
+	if (payload.reasons !== undefined) {
+		validateStringArray(payload.reasons, `${label}.reasons`);
+	}
+}
+
+function validateSessionMessageArray(value: unknown, label: string): Message[] {
+	if (!Array.isArray(value)) {
+		throw new Error(`${label} must be an array`);
+	}
+	return value.map((entry, index) =>
+		validateSessionMessage(entry, `${label}[${index}]`),
+	);
+}
+
+function validateSessionMessage(value: unknown, label: string): Message {
+	const message = requireSessionRecord(value, label);
+	const role = requireSessionString(message, "role", label);
+	if (!["user", "assistant", "tool", "system", "agent"].includes(role)) {
+		throw new Error(`${label}.role is invalid`);
+	}
+	const allowedKeys = ["role", "content", "containsUntrustedAgentContent"];
+	if (role === "assistant") {
+		allowedKeys.push("toolCalls");
+	} else if (role === "tool") {
+		allowedKeys.push("toolCallId");
+	}
+	assertSessionKeys(message, ["role", "content"], allowedKeys.slice(2), label);
+	requireSessionString(message, "content", label);
+	if (
+		message.containsUntrustedAgentContent !== undefined &&
+		typeof message.containsUntrustedAgentContent !== "boolean"
+	) {
+		throw new Error(`${label}.containsUntrustedAgentContent must be a boolean`);
+	}
+	if (role === "assistant" && message.toolCalls !== undefined) {
+		validateSessionToolCalls(message.toolCalls, `${label}.toolCalls`);
+	}
+	if (role === "tool") {
+		requireNonEmptySessionString(message, "toolCallId", label);
+	}
+	validateRestoredMessages([message]);
+	return message as Message;
+}
+
+function validateSessionToolCalls(value: unknown, label: string): void {
+	if (!Array.isArray(value)) {
+		throw new Error(`${label} must be an array`);
+	}
+	const ids = new Set<string>();
+	for (const [index, entry] of value.entries()) {
+		const call = requireSessionRecord(entry, `${label}[${index}]`);
+		assertSessionKeys(
+			call,
+			["id", "name", "arguments"],
+			[],
+			`${label}[${index}]`,
+		);
+		const id = requireNonEmptySessionString(call, "id", `${label}[${index}]`);
+		requireNonEmptySessionString(call, "name", `${label}[${index}]`);
+		requireSessionString(call, "arguments", `${label}[${index}]`);
+		if (ids.has(id)) {
+			throw new Error(`${label} contains duplicate id: ${id}`);
+		}
+		ids.add(id);
+	}
+}
+
+function validatePermissionContext(value: unknown, label: string): void {
+	const context = requireSessionRecord(value, `${label} toolPermissionContext`);
+	assertSessionKeys(
+		context,
+		["mode"],
+		[
+			"agentType",
+			"writePolicy",
+			"sessionAllowedTools",
+			"prePlanMode",
+			"pendingPlanApproval",
+			"pendingToolApproval",
+		],
+		`${label} toolPermissionContext`,
+	);
+	if (context.mode !== "normal" && context.mode !== "plan") {
+		throw new Error(`${label} toolPermissionContext.mode is invalid`);
+	}
+	if (
+		context.agentType !== undefined &&
+		context.agentType !== "main" &&
+		context.agentType !== "memory" &&
+		context.agentType !== "subagent"
+	) {
+		throw new Error(`${label} toolPermissionContext.agentType is invalid`);
+	}
+	if (context.sessionAllowedTools !== undefined) {
+		validateStringArray(
+			context.sessionAllowedTools,
+			`${label} toolPermissionContext.sessionAllowedTools`,
+		);
+	}
+	if (context.writePolicy !== undefined) {
+		const policy = requireSessionRecord(
+			context.writePolicy,
+			`${label} toolPermissionContext.writePolicy`,
+		);
+		assertSessionKeys(
+			policy,
+			[],
+			["allow", "deny"],
+			`${label} toolPermissionContext.writePolicy`,
+		);
+		if (policy.allow !== undefined) {
+			validateStringArray(
+				policy.allow,
+				`${label} toolPermissionContext.writePolicy.allow`,
+			);
+		}
+		if (policy.deny !== undefined) {
+			validateStringArray(
+				policy.deny,
+				`${label} toolPermissionContext.writePolicy.deny`,
+			);
+		}
+	}
+	if (
+		context.prePlanMode !== undefined &&
+		context.prePlanMode !== "normal" &&
+		context.prePlanMode !== "plan"
+	) {
+		throw new Error(`${label} toolPermissionContext.prePlanMode is invalid`);
+	}
+	normalizeRestoredPendingPlanApproval(context.pendingPlanApproval);
+	validateRestoredPendingToolApproval(context.pendingToolApproval);
+}
+
+function validateBudget(value: unknown, label: string): void {
+	const budget = requireSessionRecord(value, label);
+	assertSessionKeys(budget, ["turnsUsed", "maxTurns"], [], label);
+	const turnsUsed = requireNonNegativeSessionInteger(
+		budget,
+		"turnsUsed",
+		label,
+	);
+	const maxTurns = requirePositiveSessionInteger(budget, "maxTurns", label);
+	if (turnsUsed > maxTurns) {
+		throw new Error(`${label}.turnsUsed must not exceed maxTurns`);
+	}
+}
+
+function validateCompaction(value: unknown, label: string): void {
+	const compaction = requireSessionRecord(value, label);
+	assertSessionKeys(compaction, ["consecutiveFailures"], [], label);
+	requireNonNegativeSessionInteger(compaction, "consecutiveFailures", label);
+}
+
+function validateToolExecutions(value: unknown, label: string): void {
+	if (!Array.isArray(value)) {
+		throw new Error(`${label} must be an array`);
+	}
+	for (const [index, entry] of value.entries()) {
+		const execution = requireSessionRecord(entry, `${label}[${index}]`);
+		assertSessionKeys(
+			execution,
+			["callId", "tool", "status"],
+			["target", "turn", "timestamp"],
+			`${label}[${index}]`,
+		);
+		requireNonEmptySessionString(execution, "callId", `${label}[${index}]`);
+		requireNonEmptySessionString(execution, "tool", `${label}[${index}]`);
+		if (
+			!["succeeded", "failed", "unknown"].includes(String(execution.status))
+		) {
+			throw new Error(`${label}[${index}].status is invalid`);
+		}
+		if (
+			execution.target !== undefined &&
+			typeof execution.target !== "string"
+		) {
+			throw new Error(`${label}[${index}].target must be a string`);
+		}
+		if (execution.turn !== undefined) {
+			requireNonNegativeSessionInteger(execution, "turn", `${label}[${index}]`);
+		}
+		if (execution.timestamp !== undefined) {
+			requireSessionTimestamp(execution, "timestamp", `${label}[${index}]`);
+		}
+	}
+}
+
+function validateStringArray(value: unknown, label: string): string[] {
+	if (
+		!Array.isArray(value) ||
+		value.some((entry) => typeof entry !== "string")
+	) {
+		throw new Error(`${label} must be an array of strings`);
+	}
+	return value as string[];
+}
+
+function requireSessionRecord(
+	value: unknown,
+	label: string,
+): Record<string, unknown> {
+	if (!isRecord(value)) {
+		throw new Error(`${label} must be an object`);
+	}
+	return value;
+}
+
+function assertSessionKeys(
+	record: Record<string, unknown>,
+	required: readonly string[],
+	optional: readonly string[],
+	label: string,
+): void {
+	const allowed = new Set([...required, ...optional]);
+	for (const key of required) {
+		if (!Object.hasOwn(record, key)) {
+			throw new Error(`${label}.${key} is required`);
+		}
+	}
+	for (const key of Object.keys(record)) {
+		if (!allowed.has(key)) {
+			throw new Error(`${label}.${key} is not allowed`);
+		}
+	}
+}
+
+function requireSessionString(
+	record: Record<string, unknown>,
+	key: string,
+	label: string,
+): string {
+	const value = record[key];
+	if (typeof value !== "string") {
+		throw new Error(`${label}.${key} must be a string`);
+	}
+	return value;
+}
+
+function requireNonEmptySessionString(
+	record: Record<string, unknown>,
+	key: string,
+	label: string,
+): string {
+	const value = requireSessionString(record, key, label);
+	if (!value.trim()) {
+		throw new Error(`${label}.${key} must not be empty`);
+	}
+	return value;
+}
+
+function requireSessionId(
+	record: Record<string, unknown>,
+	label: string,
+): string {
+	const value = requireNonEmptySessionString(record, "sessionId", label);
+	if (!SESSION_ID_PATTERN.test(value) || value === "." || value === "..") {
+		throw new Error(`${label}.sessionId is invalid`);
+	}
+	return value;
+}
+
+function requireSessionBoolean(
+	record: Record<string, unknown>,
+	key: string,
+	label: string,
+): boolean {
+	const value = record[key];
+	if (typeof value !== "boolean") {
+		throw new Error(`${label}.${key} must be a boolean`);
+	}
+	return value;
+}
+
+function requireNonNegativeSessionInteger(
+	record: Record<string, unknown>,
+	key: string,
+	label: string,
+): number {
+	const value = record[key];
+	if (!Number.isSafeInteger(value) || Number(value) < 0) {
+		throw new Error(`${label}.${key} must be a non-negative integer`);
+	}
+	return Number(value);
+}
+
+function requirePositiveSessionInteger(
+	record: Record<string, unknown>,
+	key: string,
+	label: string,
+): number {
+	const value = record[key];
+	if (!Number.isSafeInteger(value) || Number(value) <= 0) {
+		throw new Error(`${label}.${key} must be a positive integer`);
+	}
+	return Number(value);
+}
+
+function requireSessionTimestamp(
+	record: Record<string, unknown>,
+	key: string,
+	label: string,
+): string {
+	const value = requireNonEmptySessionString(record, key, label);
+	if (!Number.isFinite(Date.parse(value))) {
+		throw new Error(`${label}.${key} must be a valid timestamp`);
+	}
+	return value;
 }
 
 function createMessageEvents(

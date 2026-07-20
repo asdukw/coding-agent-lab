@@ -129,6 +129,192 @@ test("loadSession rejects malformed JSONL before the final record", async () => 
 	}
 });
 
+test("loadSession rejects a complete but invalid final JSONL record", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "cagent-session-"));
+	try {
+		const state = createInitialState(
+			"reject semantic tail",
+			cwd,
+			[],
+			"semantic-tail-1",
+		);
+		const path = await saveSession(cwd, state);
+		await appendFile(
+			path,
+			JSON.stringify({
+				version: 2,
+				timestamp: "2026-07-20T00:00:00.000Z",
+				type: "future_event",
+				sessionId: state.sessionId,
+				payload: {},
+			}),
+			"utf8",
+		);
+
+		await expect(loadSession(cwd, state.sessionId)).rejects.toThrow(
+			"unsupported session event type: future_event",
+		);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("loadSession rejects semantically invalid complete JSONL records", async () => {
+	const scenarios: Array<{
+		name: string;
+		expected: string;
+		createEvent(
+			sessionId: string,
+			timestamp: string,
+			snapshot: Record<string, unknown>,
+		): Record<string, unknown>;
+	}> = [
+		{
+			name: "unknown version",
+			expected: "unsupported session event version: 3",
+			createEvent: (sessionId, timestamp) => ({
+				version: 3,
+				timestamp,
+				type: "future_event",
+				sessionId,
+				payload: {},
+			}),
+		},
+		{
+			name: "unknown type",
+			expected: "unsupported session event type: future_event",
+			createEvent: (sessionId, timestamp) => ({
+				version: 2,
+				timestamp,
+				type: "future_event",
+				sessionId,
+				payload: {},
+			}),
+		},
+		{
+			name: "missing payload",
+			expected: "session event.payload is required",
+			createEvent: (sessionId, timestamp) => ({
+				version: 2,
+				timestamp,
+				type: "user_message",
+				sessionId,
+			}),
+		},
+		{
+			name: "missing session id",
+			expected: "session event.sessionId is required",
+			createEvent: (_sessionId, timestamp) => ({
+				version: 2,
+				timestamp,
+				type: "user_message",
+				payload: { message: { role: "user", content: "tampered" } },
+			}),
+		},
+		{
+			name: "message role mismatch",
+			expected: "user_message payload has incompatible message role",
+			createEvent: (sessionId, timestamp) => ({
+				version: 2,
+				timestamp,
+				type: "user_message",
+				sessionId,
+				payload: {
+					message: { role: "assistant", content: "tampered" },
+				},
+			}),
+		},
+		{
+			name: "invalid snapshot payload",
+			expected: "state_snapshot payload budget.turnsUsed",
+			createEvent: (_sessionId, _timestamp, snapshot) => ({
+				...snapshot,
+				payload: {
+					...(snapshot.payload as Record<string, unknown>),
+					budget: { turnsUsed: "tampered", maxTurns: 20 },
+				},
+			}),
+		},
+	];
+
+	for (const [index, scenario] of scenarios.entries()) {
+		const cwd = await mkdtemp(join(tmpdir(), "cagent-session-"));
+		try {
+			const sessionId = `semantic-corruption-${index}`;
+			const state = createInitialState(scenario.name, cwd, [], sessionId);
+			const path = await saveSession(cwd, state);
+			const lines = (await readFile(path, "utf8")).trimEnd().split("\n");
+			const snapshot = JSON.parse(lines.at(-1) ?? "null") as Record<
+				string,
+				unknown
+			>;
+			lines.splice(
+				1,
+				0,
+				JSON.stringify(
+					scenario.createEvent(sessionId, "2026-07-20T00:00:00.000Z", snapshot),
+				),
+			);
+			await writeFile(path, `${lines.join("\n")}\n`, "utf8");
+
+			await expect(loadSession(cwd, sessionId)).rejects.toThrow(
+				`invalid session event at line 2: ${scenario.expected}`,
+			);
+		} finally {
+			await rm(cwd, { recursive: true, force: true });
+		}
+	}
+});
+
+test("loadSession rejects blank records and duplicate metadata", async () => {
+	for (const corruption of ["blank", "duplicate metadata"] as const) {
+		const cwd = await mkdtemp(join(tmpdir(), "cagent-session-"));
+		try {
+			const sessionId = `sequence-corruption-${corruption.replace(" ", "-")}`;
+			const state = createInitialState(corruption, cwd, [], sessionId);
+			const path = await saveSession(cwd, state);
+			const lines = (await readFile(path, "utf8")).trimEnd().split("\n");
+			lines.splice(1, 0, corruption === "blank" ? "" : (lines[0] ?? ""));
+			await writeFile(path, `${lines.join("\n")}\n`, "utf8");
+
+			await expect(loadSession(cwd, sessionId)).rejects.toThrow(
+				corruption === "blank"
+					? "invalid session event at line 2: empty records are not allowed"
+					: "invalid session event at line 2: duplicate session metadata",
+			);
+		} finally {
+			await rm(cwd, { recursive: true, force: true });
+		}
+	}
+});
+
+test("loadSession requires metadata as the first complete event", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "cagent-session-"));
+	try {
+		const state = createInitialState(
+			"metadata first",
+			cwd,
+			[],
+			"metadata-first-1",
+		);
+		const path = await saveSession(cwd, state);
+		const lines = (await readFile(path, "utf8")).trimEnd().split("\n");
+		const metadata = JSON.parse(lines[0] ?? "null") as Record<string, unknown>;
+		lines[0] = JSON.stringify({
+			...metadata,
+			type: "user_message",
+			payload: { message: { role: "user", content: "tampered" } },
+		});
+		await writeFile(path, `${lines.join("\n")}\n`, "utf8");
+
+		await expect(loadSession(cwd, state.sessionId)).rejects.toThrow(
+			"invalid session event at line 1: first event must contain session metadata",
+		);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
 test("concurrent message appends keep each event batch contiguous", async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "cagent-session-"));
 	try {
