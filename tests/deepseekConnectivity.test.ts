@@ -14,7 +14,7 @@ if (!apiKey) {
 		});
 
 		let output = "";
-		for await (const delta of client.stream({
+		for await (const event of client.stream({
 			messages: [
 				{
 					role: "system",
@@ -26,7 +26,9 @@ if (!apiKey) {
 				},
 			],
 		})) {
-			output += delta;
+			if (event.type === "text_delta") {
+				output += event.content;
+			}
 		}
 
 		expect(output.trim().length).toBeGreaterThan(0);

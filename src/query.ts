@@ -307,7 +307,11 @@ export async function* query({
 					content: event.content,
 				};
 			} else {
-				toolCalls.push(event);
+				toolCalls.push({
+					id: event.id,
+					name: event.name,
+					arguments: event.arguments,
+				});
 			}
 		}
 

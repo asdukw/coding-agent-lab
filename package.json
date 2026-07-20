@@ -9,6 +9,8 @@
 	"scripts": {
 		"start": "bun --no-env-file src/main.tsx",
 		"dev": "bun --no-env-file --watch src/main.tsx",
+		"demo:offline": "bun --no-env-file src/demo/offline.ts",
+		"demo:deepseek": "bun --no-env-file src/demo/deepseek.ts",
 		"build:sandbox": "\"$SYSTEMROOT/System32/WindowsPowerShell/v1.0/powershell.exe\" -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows-sandbox.ps1 -Install",
 		"check": "tsc --noEmit",
 		"test": "bun run test:unit",
@@ -16,10 +18,10 @@
 		"test:deepseek": "bun test tests/deepseekConnectivity.test.ts",
 		"test:sandbox": "bun test tests/integration/windowsSandbox.test.ts",
 		"ci": "bun run check:style && bun run check && bun run test:unit",
-		"lint": "biome check src tests package.json tsconfig.json",
-		"format": "biome format --write src tests package.json tsconfig.json",
-		"check:style": "biome check src tests package.json tsconfig.json",
-		"fix": "biome check --write src tests package.json tsconfig.json"
+		"lint": "biome check src tests examples package.json tsconfig.json",
+		"format": "biome format --write src tests examples package.json tsconfig.json",
+		"check:style": "biome check src tests examples package.json tsconfig.json",
+		"fix": "biome check --write src tests examples package.json tsconfig.json"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.5.0",

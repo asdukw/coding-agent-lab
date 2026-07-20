@@ -10,6 +10,55 @@ Coding Agent Lab 是一个学习型工程项目。Claude Code 与 Codex 是它�
 
 这个项目不以复刻某个产品或成为商业替代品为目标。它更关注一个问题：**当不可信的模型输出开始读取代码、修改文件和启动进程时，控制面需要建立怎样的边界，才能让整个执行过程可理解、可恢复、可验证？**
 
+## 60 秒离线体验
+
+无需模型 API Key。依赖安装完成后，Demo 不访问模型网络，也不会修改当前仓库：
+
+```bash
+bun install --frozen-lockfile
+bun run demo:offline
+```
+
+Demo 在临时 workspace 中复用真实 Agent Loop、计划审批、文件工具与 Session Store，固定演示：
+
+```text
+进入 Plan Mode → 读取 fixture → 提交并批准计划
+  → Read → 批准 Edit → 修改并复查
+  → 保存 Session → load → 继续一次真实 follow-up
+```
+
+执行完成后会保留脱敏的 JSON 与 Markdown 报告，并打印其临时目录。任一状态转换、工具结果、持久化或恢复断言失败都会写入结构化失败信息并返回非零退出码。CI 会在 Ubuntu 和 Windows 分别执行相同场景，并上传带平台与 run-attempt 标识的 `offline-demo-*` artifact。
+
+离线 Demo 为保证跨平台和确定性，显式只注册 Plan、`Read` 与 `Edit` 工具，不暴露 `Shell`；Windows 原生 Sandbox 由独立 Release runner E2E 验证。
+
+## 真实 DeepSeek 体验（人工审批）
+
+如果想观察真实模型如何制定计划、申请修改并根据工具结果继续执行任务，可以复制示例配置并填写 API Key：
+
+```powershell
+Copy-Item .env.example .env
+# 编辑 .env，填写 DEEPSEEK_API_KEY
+bun run demo:deepseek
+```
+
+也可以不创建 `.env`，直接在父进程中设置 `DEEPSEEK_API_KEY`。Demo 会把同一份 fixture 复制到系统临时 workspace，只向模型提供 `Read`、`Edit`、`UpdatePlan` 与 `ExitPlanMode`，不暴露 `Shell`。计划提交后输入 `approve`、`reject` 或 `abort`；`Edit` 批次执行前输入 `allow`、`deny` 或 `abort`，不存在自动批准模式。
+
+完成后终端会展示模型回复、工具请求与结果、最终 diff，以及脱敏的 JSON / Markdown 报告路径。仓库中的 fixture 不会被修改，API Key、完整 Prompt、模型输出和工具参数不会写入报告。该流程会访问真实 DeepSeek API，输出与调用次数并不确定，可能产生 API 费用，因此只用于本地人工演示，不进入常规 CI。
+
+## 能力与工程证据
+
+| 能力 | 主要实现 | 自动验证 |
+| --- | --- | --- |
+| Agent Loop 与结构化工具调用 | [`src/query.ts`](src/query.ts)、[`src/tools/runner.ts`](src/tools/runner.ts) | [`tests/query.tool.test.ts`](tests/query.tool.test.ts) |
+| Plan Mode 与危险操作审批 | [`src/plan.ts`](src/plan.ts)、[`src/tools/permissions.ts`](src/tools/permissions.ts) | [`tests/planMode.test.ts`](tests/planMode.test.ts)、[`tests/permissionApproval.test.ts`](tests/permissionApproval.test.ts) |
+| JSONL Session、崩溃恢复与严格校验 | [`src/sessionStore.ts`](src/sessionStore.ts) | [`tests/sessionStore.test.ts`](tests/sessionStore.test.ts) |
+| Sub-agent、Mailbox 与资源调度 | [`src/agents/`](src/agents/) | [`tests/agentManager.test.ts`](tests/agentManager.test.ts)、[`tests/agentMailbox.test.ts`](tests/agentMailbox.test.ts) |
+| MCP 与长期 Memory | [`src/mcp/`](src/mcp/)、[`src/memory.ts`](src/memory.ts) | [`tests/mcp.test.ts`](tests/mcp.test.ts)、[`tests/memory.test.ts`](tests/memory.test.ts) |
+| Restricted Token Windows 执行边界 | [`src/sandbox/`](src/sandbox/)、[`native/windows-sandbox-runner/`](native/windows-sandbox-runner/) | [`tests/integration/windowsSandbox.test.ts`](tests/integration/windowsSandbox.test.ts)、[CI](.github/workflows/ci.yml) |
+| 可恢复的确定性端到端场景 | [`src/demo/offlineDemo.ts`](src/demo/offlineDemo.ts)、[`src/demo/scriptedDemoModel.ts`](src/demo/scriptedDemoModel.ts) | `bun run demo:offline`、[CI artifact](.github/workflows/ci.yml) |
+
+更完整的分层与信任边界见 [`docs/architecture.md`](docs/architecture.md)，关键设计取舍记录在 [`docs/adr/`](docs/adr/)。
+
 ## 学习目标
 
 - 将 Agent 理论转化为完整的请求—工具—状态循环，而不只停留在 Prompt 或 API 调用层。
@@ -97,13 +146,15 @@ bun install
 
 ### 2. 配置模型
 
-当前真实模型适配器使用 DeepSeek 的 OpenAI-compatible API。请在启动 Agent 的父进程中设置环境变量；项目刻意禁用了 Bun 自动加载 workspace `.env*`：
+当前真实模型适配器使用 DeepSeek 的 OpenAI-compatible API。常规 `start` / `dev` 入口刻意禁用了 Bun 自动加载 workspace `.env*`，请在启动 Agent 的父进程中设置环境变量：
 
 ```powershell
 $env:DEEPSEEK_API_KEY = "your-key"
 $env:DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 $env:DEEPSEEK_MODEL = "deepseek-v4-flash"
 ```
+
+`demo:deepseek` 单独提供了显式 dotenv 加载：它只读取仓库根目录 `.env` 中的 `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL` 和 `DEEPSEEK_MODEL`，而且不会覆盖父进程中已经存在的同名变量。这个受限 allowlist 不会改变 `start` / `dev` 的加载行为，也不会把 `.env` 中的其他变量带入 Agent 进程；请勿提交包含密钥的 `.env`。
 
 如果未设置 `DEEPSEEK_API_KEY`，应用会使用确定性的 Stub Model，适合查看 UI、Session 和基础交互，但不会执行真实 Coding Agent 推理。Windows 启动仍会初始化原生 Sandbox，因此即使使用 Stub，也需要先完成下一步的 runner 构建。
 
@@ -196,6 +247,12 @@ bun run check:style
 # TypeScript
 bun run check
 
+# 确定性离线端到端 Demo
+bun run demo:offline
+
+# 需要 DEEPSEEK_API_KEY 和人工审批的真实模型 Demo
+bun run demo:deepseek
+
 # 离线单元测试
 bun run test:unit
 
@@ -214,7 +271,10 @@ GitHub Actions 当前包含：
 
 - Ubuntu Quality：Biome 与 TypeScript。
 - Ubuntu / Windows：离线 Bun 测试。
+- Ubuntu / Windows：确定性离线 Demo 与脱敏报告 artifact。
 - Windows 2022：Rust fmt、Clippy、单元测试、Release 构建与真实 Sandbox E2E。
+
+`demo:deepseek` 与 `test:deepseek` 需要真实凭据、访问外部 API，且结果可能受模型变化影响，因此不在常规 CI 中执行；其中 `demo:deepseek` 还必须由人在终端显式批准计划与文件修改。
 
 ## 安全边界
 
@@ -239,6 +299,7 @@ Windows M1 Sandbox 的目标是限制本地文件写入并管理普通子进程�
 ```text
 src/
   agents/                 Sub-agent runtime 与 mailbox
+  demo/                   离线 / 真实模型场景、报告与 CLI
   mcp/                    MCP 配置、发现与适配
   model/                  模型抽象、DeepSeek 与 Stub
   sandbox/                Windows Sandbox TypeScript 控制面
@@ -248,6 +309,8 @@ src/
   sessionStore.ts         JSONL Session 持久化与恢复
 native/
   windows-sandbox-runner/ Rust / Win32 原生 runner
+examples/offline-demo/    只读复制到临时 workspace 的共享 Demo fixture
+docs/                     架构说明与 ADR
 tests/                    Bun 单元测试与 Windows E2E
 ```
 
@@ -255,4 +318,4 @@ tests/                    Bun 单元测试与 Windows E2E
 
 Claude Code 与 Codex 是本项目的重要学习参照。本项目基于公开文档、公开可观察行为和通用 Agent 工程原理，独立实现 Coding Agent 的核心控制面；项目使用 Ink、MCP SDK、OpenAI SDK、Zod 等通用基础库，与 Anthropic 或 OpenAI 没有关联，也不包含它们的私有实现。
 
-作为学习项目，我更关注理解设计取舍并留下可验证证据，而不是追求功能清单或对外发布。后续工作会继续围绕架构记录、可重复 Demo、故障注入和性能基线展开。
+作为学习项目，我更关注理解设计取舍并留下可验证证据，而不是追求功能清单或对外发布。后续工作会继续围绕 ChangeSet/diff 预览、故障注入和性能基线展开。

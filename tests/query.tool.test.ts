@@ -29,6 +29,7 @@ import {
 	appendSessionState,
 	ensureSessionStarted,
 	getSessionPath,
+	loadSession,
 } from "../src/sessionStore";
 import { createInitialState, createToolPermissionContext } from "../src/state";
 import type { Tool } from "../src/tools/types";
@@ -682,6 +683,19 @@ test("denied tool calls are persisted as session tool results", async () => {
 		const raw = await readFile(getSessionPath(cwd, "denied-log-1"), "utf8");
 		expect(raw).toContain('"type":"tool_result"');
 		expect(raw).toContain("denied by write policy");
+		const restored = await loadSession(cwd, "denied-log-1");
+		const restoredToolCall = restored.messages.find(
+			(message) => message.role === "assistant" && message.toolCalls?.length,
+		)?.toolCalls?.[0];
+		expect(restoredToolCall).toEqual({
+			id: "write",
+			name: "Write",
+			arguments: JSON.stringify({
+				file_path: deniedPath,
+				content: "written",
+			}),
+		});
+		expect(restoredToolCall).not.toHaveProperty("type");
 		await expect(access(deniedPath)).rejects.toThrow();
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
