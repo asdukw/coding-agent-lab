@@ -113,6 +113,7 @@ test("query executes a tool call and round-trips the result back to the model", 
 	const toolMessage = terminal?.state.messages.find((m) => m.role === "tool");
 	expect(toolMessage?.toolCallId).toBe("call_1");
 	expect(toolMessage?.content).toBe(JSON.stringify({ sum: 5 }));
+	expect(toolMessage?.toolResult).toEqual({ status: "succeeded" });
 
 	expect(terminal?.state.observations).toEqual([
 		{
@@ -155,8 +156,19 @@ test("query feeds an error back as the tool result when the tool is unknown", as
 
 	const toolMessage = terminal?.state.messages.find((m) => m.role === "tool");
 	expect(toolMessage?.content).toBe("error: unknown tool: add");
+	expect(toolMessage?.toolResult).toEqual({
+		status: "failed",
+		failure: {
+			kind: "runtime_error",
+			message: "unknown tool: add",
+		},
+	});
 	expect(terminal?.state.observations[0]?.ok).toBe(false);
+	expect(terminal?.state.observations[0]?.failure?.kind).toBe("runtime_error");
 	expect(terminal?.state.toolExecutions[0]?.status).toBe("failed");
+	expect(terminal?.state.toolExecutions[0]?.failure?.kind).toBe(
+		"runtime_error",
+	);
 });
 
 class FakeInvalidArgsModelClient implements ModelClient {
@@ -241,6 +253,8 @@ test("query rejects arguments that fail the tool input schema before calling it"
 	expect(called).toBe(false);
 	const toolMessage = terminal?.state.messages.find((m) => m.role === "tool");
 	expect(toolMessage?.content).toMatch(/^error:/);
+	expect(toolMessage?.toolResult?.status).toBe("failed");
+	expect(toolMessage?.toolResult?.failure?.kind).toBe("runtime_error");
 	expect(terminal?.state.observations[0]?.ok).toBe(false);
 });
 

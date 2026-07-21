@@ -6,13 +6,34 @@ import type { ToolSpec } from "./tools/types";
 
 export type Role = "user" | "assistant" | "tool" | "system" | "agent";
 
+export type ToolFailureKind =
+	| "permission_denied"
+	| "backend_unavailable"
+	| "command_failed"
+	| "runtime_error";
+
+export type ToolFailure = {
+	kind: ToolFailureKind;
+	message: string;
+	stage?: string;
+	exitCode?: number;
+};
+
+export type ToolResultMetadata =
+	| { status: "succeeded"; failure?: never }
+	| { status: "failed"; failure: ToolFailure };
+
 export type Message = {
 	role: Role;
 	content: string;
+	/** Marks a local approval response so the UI does not present it as user input. */
+	origin?: "approval";
 	/** Present on assistant messages that request tool calls. */
 	toolCalls?: { id: string; name: string; arguments: string }[];
 	/** Present on role:'tool' messages, linking back to the requesting call. */
 	toolCallId?: string;
+	/** Structured execution status; content remains the model-facing tool result. */
+	toolResult?: ToolResultMetadata;
 	/** Preserves the trust boundary when a system compaction summarizes agent data. */
 	containsUntrustedAgentContent?: boolean;
 };
@@ -29,6 +50,7 @@ export type Observation = {
 	ok: boolean;
 	output: string;
 	exitCode?: number;
+	failure?: ToolFailure;
 };
 
 export type ToolCall = {
@@ -354,6 +376,7 @@ export function resolvePlanApproval(
 				{
 					role: "user",
 					content: `User approved the plan. You can now implement it.\n\nApproved plan:\n\n${pending.plan}`,
+					origin: "approval",
 				},
 			],
 			transition: { reason: "plan_approved" },
@@ -376,6 +399,7 @@ export function resolvePlanApproval(
 			{
 				role: "user",
 				content: `User rejected the plan. Stay in plan mode, revise the runtime plan, and call ExitPlanMode again when ready.${feedbackText}`,
+				origin: "approval",
 			},
 		],
 		transition: { reason: "plan_rejected" },

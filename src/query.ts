@@ -576,7 +576,7 @@ async function loadRelevantMemoriesPrompt(
 function latestUserInput(state: AgentState): string {
 	for (let i = state.messages.length - 1; i >= 0; i--) {
 		const message = state.messages[i];
-		if (message?.role === "user") {
+		if (message?.role === "user" && message.origin !== "approval") {
 			return message.content;
 		}
 	}
@@ -606,7 +606,11 @@ function shouldRequestMemoryExtraction(state: AgentState): boolean {
 		if (hasAssistant && message.role === "agent") {
 			return false;
 		}
-		if (hasAssistant && message.role === "user") {
+		if (
+			hasAssistant &&
+			message.role === "user" &&
+			message.origin !== "approval"
+		) {
 			userText = message.content.toLowerCase();
 			break;
 		}
@@ -724,6 +728,7 @@ function applyToolCallResult(
 			tool: call.name,
 			args: result.args,
 			ok: result.ok,
+			failure: result.failure,
 			turn: state.turn,
 			timestamp: new Date().toISOString(),
 		}),

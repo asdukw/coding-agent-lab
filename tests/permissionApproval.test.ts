@@ -170,6 +170,14 @@ test("denial returns a tool error without calling the denied tool", async () => 
 			(message) => message.role === "tool" && message.toolCallId === "write",
 		);
 		expect(denied?.content).toContain("User denied Write");
+		expect(denied?.toolResult).toEqual({
+			status: "failed",
+			failure: {
+				kind: "permission_denied",
+				message: "User denied Write",
+				stage: "user_denied",
+			},
+		});
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}

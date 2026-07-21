@@ -8,21 +8,109 @@ import {
 	getMemoryDir,
 	MAX_MEMORY_TOPIC_BYTES,
 } from "../src/memory";
+import { WindowsSandboxError } from "../src/sandbox";
 import { createInitialState } from "../src/state";
 import { BUILTIN_TOOLS } from "../src/tools";
 import { editTool } from "../src/tools/editTool";
+import { classifyToolFailure } from "../src/tools/errors";
 import { globTool } from "../src/tools/globTool";
 import { grepTool } from "../src/tools/grepTool";
 import { getToolPermissionDecision } from "../src/tools/permissions";
 import { readTool } from "../src/tools/readTool";
 import { RuntimeResourceLock } from "../src/tools/resourceLock";
 import { runToolCalls } from "../src/tools/runner";
+import { type ShellOutput, shellCommandFailure } from "../src/tools/shellTool";
 import type { Tool, ToolContext } from "../src/tools/types";
 import { writeTool } from "../src/tools/writeTool";
 
 async function makeTempDir(): Promise<string> {
 	return mkdtemp(join(tmpdir(), "cagent-tools-"));
 }
+
+test("tool failures distinguish backend and command failures", async () => {
+	const backend = classifyToolFailure(
+		new WindowsSandboxError("PowerShell is unavailable", {
+			stage: "resolve_executable",
+		}),
+	);
+	expect(backend.failure).toEqual({
+		kind: "backend_unavailable",
+		message: "PowerShell is unavailable",
+		stage: "resolve_executable",
+	});
+	expect(
+		classifyToolFailure(
+			new WindowsSandboxError("Sandbox cannot recover", {
+				stage: "sandbox_poisoned",
+			}),
+		).failure.kind,
+	).toBe("backend_unavailable");
+
+	const shellOutput: ShellOutput = {
+		stdout: "partial output",
+		stderr: "command failed",
+		exit_code: 7,
+		timed_out: false,
+		stdout_truncated: false,
+		stderr_truncated: false,
+		enforcement: {
+			filesystem: "write_restricted_acl",
+			process_tree: "job_members_kill_on_close",
+			network: "inherited_not_isolated",
+		},
+		network_isolated: false,
+		network_notice: "test network notice",
+	};
+	const commandFailure = shellCommandFailure(shellOutput);
+	expect(commandFailure?.failure).toEqual({
+		kind: "command_failed",
+		message: "PowerShell command exited with code 7.",
+		stage: "process_exit",
+		exitCode: 7,
+	});
+	expect(commandFailure?.details).toBe(JSON.stringify(shellOutput));
+	const timeoutFailure = shellCommandFailure({
+		...shellOutput,
+		exit_code: 1,
+		timed_out: true,
+	});
+	expect(timeoutFailure?.failure).toMatchObject({
+		kind: "command_failed",
+		stage: "timeout",
+		exitCode: 1,
+	});
+
+	const failureInputSchema = z.object({});
+	const tool: Tool<z.infer<typeof failureInputSchema>, never> = {
+		name: "FailingCommand",
+		description: "Return a structured command failure",
+		inputSchema: failureInputSchema,
+		async call() {
+			throw commandFailure;
+		},
+	};
+	const state = createInitialState("fail", process.cwd());
+	const [result] = await runToolCalls({
+		calls: [
+			{
+				id: "command-failure",
+				name: tool.name,
+				arguments: "{}",
+			},
+		],
+		tools: [tool],
+		context: {
+			getState: () => state,
+			setState() {},
+		},
+		lockManager: new RuntimeResourceLock(),
+	});
+
+	expect(result?.failure?.kind).toBe("command_failed");
+	expect(result?.message.toolResult?.failure?.exitCode).toBe(7);
+	expect(result?.message.content).toContain('"stdout":"partial output"');
+	expect(result?.message.content).toContain('"stderr":"command failed"');
+});
 
 test("built-in tools declare resource access plans", async () => {
 	const dir = await makeTempDir();

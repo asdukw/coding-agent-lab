@@ -153,6 +153,72 @@ test("resume slash command restores a saved session", async () => {
 	}
 });
 
+test("resume restores each tool request and legacy failed result once", async () => {
+	const cwd = await makeTempDir();
+	const state = {
+		...createInitialState("check shell", cwd, [], "resume-tools"),
+		turn: 1,
+		budget: {
+			turnsUsed: 1,
+			maxTurns: 20,
+		},
+		messages: [
+			{ role: "user" as const, content: "check shell" },
+			{
+				role: "assistant" as const,
+				content: "",
+				toolCalls: [
+					{
+						id: "shell-1",
+						name: "Shell",
+						arguments: JSON.stringify({ command: 'Write-Host "hello"' }),
+					},
+				],
+			},
+			{
+				role: "tool" as const,
+				content:
+					"error: resolve_executable: PowerShell was not found in a trusted location",
+				toolCallId: "shell-1",
+			},
+			{
+				role: "assistant" as const,
+				content: "The approved tool could not start its backend.",
+			},
+		],
+	};
+	await saveSession(cwd, state);
+
+	const lifecycle = createAppLifecycle();
+	const { lastFrame, stdin, unmount } = render(
+		<App
+			cwd={cwd}
+			model={new StubModelClient()}
+			enableMemoryExtraction={false}
+			lifecycle={lifecycle}
+		/>,
+	);
+
+	try {
+		await waitForInputReady(lastFrame, "Type a message and press Enter...");
+		stdin.write("/resume resume-tools");
+		stdin.write("\r");
+		await waitForFrame(lastFrame, [
+			"session: resume-tools",
+			"tool request",
+			"tool result · failed",
+			"resolve_executable",
+		]);
+
+		const frame = lastFrame() ?? "";
+		expect(frame.match(/tool request/g)).toHaveLength(1);
+		expect(frame.match(/tool result · failed/g)).toHaveLength(1);
+		expect(frame).toContain("Shell");
+	} finally {
+		await cleanupApp(unmount, lifecycle, cwd);
+	}
+});
+
 test("permissions command opens the picker and supports direct mode changes", async () => {
 	const cwd = await makeTempDir();
 	const lifecycle = createAppLifecycle();
@@ -345,13 +411,14 @@ test("plan approval prompt continues after approve", async () => {
 
 		stdin.write("1");
 		await waitForFrame(lastFrame, [
-			"approve plan",
+			"Plan approved",
 			"implementation started",
 			"Type a message and press Enter...",
 		]);
 
 		frame = lastFrame() ?? "";
-		expect(frame).toContain("approve plan");
+		expect(frame).toContain("approval");
+		expect(frame).toContain("Plan approved");
 		expect(frame).toContain("implementation started");
 	} finally {
 		await cleanupApp(unmount, lifecycle, cwd);
@@ -388,7 +455,7 @@ test("plan rejection menu collects optional feedback before continuing", async (
 		stdin.write("\r");
 
 		await waitForFrame(lastFrame, [
-			"reject plan: Add a validation step",
+			"Plan rejected: Add a validation step",
 			"implementation started",
 		]);
 		expect(
@@ -462,12 +529,18 @@ test("tool approval prompt resumes the original call after allow", async () => {
 
 		stdin.write("1");
 		await waitForFrame(lastFrame, [
+			"tool request",
+			"Tool calls allowed once",
+			"tool result · succeeded",
 			"write completed",
 			"Type a message and press Enter...",
 		]);
 
 		frame = lastFrame() ?? "";
 		expect(frame).not.toContain("tool approval");
+		expect(frame).toContain("approval");
+		expect(frame).toContain("tool request");
+		expect(frame).toContain("tool result · succeeded");
 		expect(await readFile(filePath, "utf8")).toBe("approved content");
 	} finally {
 		await cleanupApp(unmount, lifecycle, cwd);
@@ -495,9 +568,13 @@ test("tool approval menu denies the batch with the safe numeric choice", async (
 
 		stdin.write("3");
 		await waitForFrame(lastFrame, [
-			"deny tool calls",
+			"Tool calls denied",
+			"tool result · failed",
 			"Type a message and press Enter...",
 		]);
+		const frame = lastFrame() ?? "";
+		expect(frame).toContain("permission_denied");
+		expect(frame).not.toContain("user\nTool calls denied");
 		await expect(access(filePath)).rejects.toThrow();
 	} finally {
 		await cleanupApp(unmount, lifecycle, cwd);
@@ -603,7 +680,8 @@ test("background completion wakes an idle main agent exactly once", async () => 
 		await waitForFrame(lastFrame, "Type a message and press Enter...");
 
 		const frame = lastFrame() ?? "";
-		expect(frame).toContain("sub-agent notification");
+		expect(frame).toContain("child investigation complete");
+		expect(frame).not.toContain("sub-agent notification");
 		expect(model.mainRequests).toHaveLength(3);
 		expect(JSON.stringify(model.mainRequests[2])).toContain(
 			"child investigation complete",

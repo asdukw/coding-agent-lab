@@ -1,4 +1,4 @@
-import type { Message } from "./state";
+import type { Message, ToolFailure } from "./state";
 
 const MAX_TOOL_EXECUTIONS = 200;
 const MAX_RENDERED_TOOL_EXECUTIONS = 50;
@@ -14,6 +14,7 @@ export type ToolExecution = {
 	target?: string;
 	turn?: number;
 	timestamp?: string;
+	failure?: ToolFailure;
 };
 
 export function recordToolCall(
@@ -42,7 +43,7 @@ export function recordToolCall(
 export function recordToolResult(
 	executions: readonly ToolExecution[],
 	callId: string,
-	ok: boolean,
+	result: { ok: boolean; failure?: ToolFailure },
 ): ToolExecution[] {
 	const index = executions.findIndex(
 		(execution) => execution.callId === callId,
@@ -56,10 +57,15 @@ export function recordToolResult(
 	if (!execution) {
 		return next;
 	}
-	next[index] = {
-		...execution,
-		status: ok ? "succeeded" : "failed",
-	};
+	const { failure: _previousFailure, ...withoutFailure } = execution;
+	next[index] =
+		result.ok || !result.failure
+			? { ...withoutFailure, status: result.ok ? "succeeded" : "failed" }
+			: {
+					...withoutFailure,
+					status: "failed",
+					failure: { ...result.failure },
+				};
 	return next;
 }
 
@@ -70,15 +76,15 @@ export function recordCompletedToolExecution(
 		tool: string;
 		args?: Record<string, unknown>;
 		ok: boolean;
+		failure?: ToolFailure;
 		turn?: number;
 		timestamp?: string;
 	},
 ): ToolExecution[] {
-	return recordToolResult(
-		recordToolCall(executions, params),
-		params.callId,
-		params.ok,
-	);
+	return recordToolResult(recordToolCall(executions, params), params.callId, {
+		ok: params.ok,
+		failure: params.failure,
+	});
 }
 
 export function mergeToolExecutions(
@@ -109,7 +115,7 @@ export function deriveToolExecutions(
 			executions = recordToolResult(
 				executions,
 				message.toolCallId,
-				!message.content.startsWith("error:"),
+				toolResultOutcome(message),
 			);
 		}
 	}
@@ -137,7 +143,10 @@ export function formatToolExecutionMemory(
 	const lines = remembered.map((execution) => {
 		const target = execution.target ? `; target=${execution.target}` : "";
 		const turn = execution.turn === undefined ? "" : `; turn=${execution.turn}`;
-		return `- [${execution.status}] ${execution.tool}${target}${turn}`;
+		const failure = execution.failure
+			? `; failure=${execution.failure.kind}${execution.failure.stage ? `:${execution.failure.stage}` : ""}`
+			: "";
+		return `- [${execution.status}] ${execution.tool}${target}${turn}${failure}`;
 	});
 	return [
 		"# Session tool execution history",
@@ -146,6 +155,23 @@ export function formatToolExecutionMemory(
 		"",
 		...lines,
 	].join("\n");
+}
+
+export function toolResultOutcome(message: Message): {
+	ok: boolean;
+	failure?: ToolFailure;
+} {
+	if (message.toolResult?.status === "succeeded") {
+		return { ok: true };
+	}
+	if (message.toolResult?.status === "failed") {
+		return {
+			ok: false,
+			failure: { ...message.toolResult.failure },
+		};
+	}
+	// Backward compatibility for sessions written before structured tool results.
+	return { ok: !message.content.startsWith("error:") };
 }
 
 export function parseToolArguments(

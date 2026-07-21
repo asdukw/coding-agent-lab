@@ -17,6 +17,7 @@ import {
 	SEND_AGENT_MESSAGE_TOOL_NAME,
 	WAIT_AGENT_TOOL_NAME,
 } from "./agentToolNames";
+import { ToolFailureError } from "./errors";
 import {
 	ENTER_PLAN_MODE_TOOL_NAME,
 	EXIT_PLAN_MODE_TOOL_NAME,
@@ -104,9 +105,19 @@ export async function authorizeToolCall(
 		return;
 	}
 	if (decision.kind === "ask") {
-		throw new Error(`${tool.name} requires user approval: ${decision.reason}`);
+		const message = `${tool.name} requires user approval: ${decision.reason}`;
+		throw new ToolFailureError({
+			kind: "permission_denied",
+			message,
+			stage: "approval_required",
+		});
 	}
-	throw new Error(decision.reason);
+	throw new ToolFailureError({
+		kind: "permission_denied",
+		message: decision.reason,
+		stage:
+			decision.reason === `User denied ${tool.name}` ? "user_denied" : "policy",
+	});
 }
 
 export function isProtectedWorkspacePath(

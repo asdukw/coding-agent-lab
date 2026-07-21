@@ -6,6 +6,7 @@ import {
 	WINDOWS_SANDBOX_NETWORK_NOTICE,
 } from "../sandbox";
 import { hasDangerFullAccess } from "../state";
+import { ToolFailureError } from "./errors";
 import {
 	fileResourceAccesses,
 	opaqueToolAccess,
@@ -102,7 +103,7 @@ export const shellTool: Tool<ShellInput, ShellOutput> = {
 			timeoutMs: timeout_ms,
 			signal: toolContext.signal,
 		});
-		return {
+		const output: ShellOutput = {
 			stdout: result.stdout,
 			stderr: result.stderr,
 			exit_code: result.exitCode,
@@ -115,8 +116,32 @@ export const shellTool: Tool<ShellInput, ShellOutput> = {
 				? WINDOWS_FULL_ACCESS_NOTICE
 				: WINDOWS_SANDBOX_NETWORK_NOTICE,
 		};
+		const failure = shellCommandFailure(output);
+		if (failure) {
+			throw failure;
+		}
+		return output;
 	},
 };
+
+export function shellCommandFailure(
+	output: ShellOutput,
+): ToolFailureError | undefined {
+	if (!output.timed_out && output.exit_code === 0) {
+		return undefined;
+	}
+	return new ToolFailureError(
+		{
+			kind: "command_failed",
+			message: output.timed_out
+				? "PowerShell command timed out."
+				: `PowerShell command exited with code ${output.exit_code}.`,
+			stage: output.timed_out ? "timeout" : "process_exit",
+			exitCode: output.exit_code,
+		},
+		{ details: JSON.stringify(output) },
+	);
+}
 
 function requireContext(context: ToolContext | undefined): ToolContext {
 	if (!context) {

@@ -20,7 +20,9 @@ import {
 	normalizeToolPermissionContext,
 	type PendingToolApproval,
 	type RuntimePlan,
+	type ToolFailure,
 	type ToolPermissionContext,
+	type ToolResultMetadata,
 } from "./state";
 import {
 	deriveToolExecutions,
@@ -28,6 +30,7 @@ import {
 	recordToolCall,
 	recordToolResult,
 	type ToolExecution,
+	toolResultOutcome,
 } from "./toolExecutionMemory";
 import { BUILTIN_TOOLS } from "./tools";
 import { toToolSpecs } from "./tools/types";
@@ -975,11 +978,16 @@ function validateSessionMessage(value: unknown, label: string): Message {
 	if (!["user", "assistant", "tool", "system", "agent"].includes(role)) {
 		throw new Error(`${label}.role is invalid`);
 	}
-	const allowedKeys = ["role", "content", "containsUntrustedAgentContent"];
+	const allowedKeys = [
+		"role",
+		"content",
+		"containsUntrustedAgentContent",
+		"origin",
+	];
 	if (role === "assistant") {
 		allowedKeys.push("toolCalls");
 	} else if (role === "tool") {
-		allowedKeys.push("toolCallId");
+		allowedKeys.push("toolCallId", "toolResult");
 	}
 	assertSessionKeys(message, ["role", "content"], allowedKeys.slice(2), label);
 	requireSessionString(message, "content", label);
@@ -989,14 +997,78 @@ function validateSessionMessage(value: unknown, label: string): Message {
 	) {
 		throw new Error(`${label}.containsUntrustedAgentContent must be a boolean`);
 	}
+	if (message.origin !== undefined && message.origin !== "approval") {
+		throw new Error(`${label}.origin must be approval`);
+	}
+	if (message.origin === "approval" && role !== "user") {
+		throw new Error(`${label}.origin is only allowed on user messages`);
+	}
 	if (role === "assistant" && message.toolCalls !== undefined) {
 		validateSessionToolCalls(message.toolCalls, `${label}.toolCalls`);
 	}
 	if (role === "tool") {
 		requireNonEmptySessionString(message, "toolCallId", label);
+		if (message.toolResult !== undefined) {
+			validateToolResultMetadata(message.toolResult, `${label}.toolResult`);
+		}
 	}
 	validateRestoredMessages([message]);
 	return message as Message;
+}
+
+function validateToolResultMetadata(
+	value: unknown,
+	label: string,
+): ToolResultMetadata {
+	const result = requireSessionRecord(value, label);
+	const status = requireSessionString(result, "status", label);
+	if (status === "succeeded") {
+		assertSessionKeys(result, ["status"], [], label);
+		return { status };
+	}
+	if (status !== "failed") {
+		throw new Error(`${label}.status is invalid`);
+	}
+	assertSessionKeys(result, ["status", "failure"], [], label);
+	return {
+		status,
+		failure: validateToolFailure(result.failure, `${label}.failure`),
+	};
+}
+
+function validateToolFailure(value: unknown, label: string): ToolFailure {
+	const failure = requireSessionRecord(value, label);
+	assertSessionKeys(failure, ["kind", "message"], ["stage", "exitCode"], label);
+	const kind = requireSessionString(failure, "kind", label);
+	if (
+		![
+			"permission_denied",
+			"backend_unavailable",
+			"command_failed",
+			"runtime_error",
+		].includes(kind)
+	) {
+		throw new Error(`${label}.kind is invalid`);
+	}
+	const message = requireSessionString(failure, "message", label);
+	if (failure.stage !== undefined && typeof failure.stage !== "string") {
+		throw new Error(`${label}.stage must be a string`);
+	}
+	if (
+		failure.exitCode !== undefined &&
+		(typeof failure.exitCode !== "number" ||
+			!Number.isSafeInteger(failure.exitCode))
+	) {
+		throw new Error(`${label}.exitCode must be an integer`);
+	}
+	return {
+		kind: kind as ToolFailure["kind"],
+		message,
+		...(typeof failure.stage === "string" ? { stage: failure.stage } : {}),
+		...(typeof failure.exitCode === "number"
+			? { exitCode: failure.exitCode }
+			: {}),
+	};
 }
 
 function validateSessionToolCalls(value: unknown, label: string): void {
@@ -1127,7 +1199,7 @@ function validateToolExecutions(value: unknown, label: string): void {
 		assertSessionKeys(
 			execution,
 			["callId", "tool", "status"],
-			["target", "turn", "timestamp"],
+			["target", "turn", "timestamp", "failure"],
 			`${label}[${index}]`,
 		);
 		requireNonEmptySessionString(execution, "callId", `${label}[${index}]`);
@@ -1148,6 +1220,12 @@ function validateToolExecutions(value: unknown, label: string): void {
 		}
 		if (execution.timestamp !== undefined) {
 			requireSessionTimestamp(execution, "timestamp", `${label}[${index}]`);
+		}
+		if (execution.failure !== undefined) {
+			validateToolFailure(execution.failure, `${label}[${index}].failure`);
+			if (execution.status !== "failed") {
+				throw new Error(`${label}[${index}].failure requires failed status`);
+			}
 		}
 	}
 }
@@ -1375,7 +1453,7 @@ function applyCurrentSessionEvent(
 				? recordToolResult(
 						state.toolExecutions ?? [],
 						message.toolCallId,
-						!message.content.startsWith("error:"),
+						toolResultOutcome(message),
 					)
 				: state.toolExecutions,
 		};
@@ -1587,6 +1665,10 @@ function validateRestoredMessages(value: unknown): Message[] {
 		if (!isRecord(entry) || typeof entry.content !== "string") {
 			throw new Error(`invalid session message at index ${index}`);
 		}
+		const origin = validateRestoredMessageOrigin(entry, index);
+		if (entry.role !== "tool" && entry.toolResult !== undefined) {
+			throw new Error(`toolResult is only allowed on tool message ${index}`);
+		}
 		const untrusted = entry.containsUntrustedAgentContent === true;
 		if (entry.role === "system") {
 			return {
@@ -1621,10 +1703,18 @@ function validateRestoredMessages(value: unknown): Message[] {
 			) {
 				throw new Error(`invalid tool result at message ${index}`);
 			}
+			const toolResult =
+				entry.toolResult === undefined
+					? undefined
+					: validateToolResultMetadata(
+							entry.toolResult,
+							`message ${index}.toolResult`,
+						);
 			return {
 				role: "tool",
 				content: entry.content,
 				toolCallId: entry.toolCallId,
+				...(toolResult ? { toolResult } : {}),
 				...(untrusted ? { containsUntrustedAgentContent: true } : {}),
 			};
 		}
@@ -1632,11 +1722,28 @@ function validateRestoredMessages(value: unknown): Message[] {
 			return {
 				role: "user",
 				content: entry.content,
+				...(origin ? { origin } : {}),
 				...(untrusted ? { containsUntrustedAgentContent: true } : {}),
 			};
 		}
 		throw new Error(`invalid session message role at index ${index}`);
 	});
+}
+
+function validateRestoredMessageOrigin(
+	entry: Record<string, unknown>,
+	index: number,
+): "approval" | undefined {
+	if (entry.origin === undefined) {
+		return undefined;
+	}
+	if (entry.origin !== "approval") {
+		throw new Error(`invalid message origin at index ${index}`);
+	}
+	if (entry.role !== "user") {
+		throw new Error(`approval origin is only allowed on user message ${index}`);
+	}
+	return "approval";
 }
 
 function validateRestoredToolCalls(

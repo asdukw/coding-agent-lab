@@ -838,6 +838,7 @@ test("assistant tool calls are stored as separate audit events", async () => {
 			role: "tool" as const,
 			content: JSON.stringify({ content: "file contents" }),
 			toolCallId: "call-1",
+			toolResult: { status: "succeeded" as const },
 		};
 		const state: AgentState = {
 			...createInitialState("inspect", cwd, [], "tool-call-1"),
@@ -878,6 +879,67 @@ test("assistant tool calls are stored as separate audit events", async () => {
 			}),
 		]);
 		expect(restored.toolExecutions[0]).not.toHaveProperty("output");
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("structured tool failures and approval origins survive session restore", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "cagent-session-"));
+	try {
+		const state: AgentState = {
+			...createInitialState("inspect failures", cwd, [], "tool-failure-1"),
+			messages: [
+				{ role: "user", content: "approved", origin: "approval" },
+				{
+					role: "assistant",
+					content: "",
+					toolCalls: [
+						{ id: "new-call", name: "Shell", arguments: "{}" },
+						{ id: "legacy-call", name: "Read", arguments: "{}" },
+					],
+				},
+				{
+					role: "tool",
+					content: "error: PowerShell is unavailable",
+					toolCallId: "new-call",
+					toolResult: {
+						status: "failed",
+						failure: {
+							kind: "backend_unavailable",
+							message: "PowerShell is unavailable",
+							stage: "resolve_executable",
+						},
+					},
+				},
+				{
+					role: "tool",
+					content: "error: legacy failure",
+					toolCallId: "legacy-call",
+				},
+			],
+		};
+
+		await saveSession(cwd, state);
+		const restored = await loadSession(cwd, state.sessionId);
+
+		expect(restored.messages).toEqual(state.messages);
+		expect(restored.toolExecutions).toEqual([
+			expect.objectContaining({
+				callId: "new-call",
+				status: "failed",
+				failure: {
+					kind: "backend_unavailable",
+					message: "PowerShell is unavailable",
+					stage: "resolve_executable",
+				},
+			}),
+			expect.objectContaining({
+				callId: "legacy-call",
+				status: "failed",
+			}),
+		]);
+		expect(restored.toolExecutions[1]).not.toHaveProperty("failure");
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}

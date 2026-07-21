@@ -124,6 +124,7 @@ test("plan mode switches tool specs, writes a plan, and pauses for approval", as
 	expect(approvedState.messages.at(-1)?.content).toContain(
 		"User approved the plan",
 	);
+	expect(approvedState.messages.at(-1)?.origin).toBe("approval");
 });
 
 class WriteOutsidePlanModelClient implements ModelClient {

@@ -1,5 +1,6 @@
 import type { AgentRuntime } from "../agents/types";
-import type { AgentState, Message, Observation } from "../state";
+import type { AgentState, Message, Observation, ToolFailure } from "../state";
+import { classifyToolFailure } from "./errors";
 import { authorizeToolCall } from "./permissions";
 import {
 	opaqueToolAccess,
@@ -22,6 +23,7 @@ export type ToolCallResult = {
 	ok: boolean;
 	args: Record<string, unknown>;
 	output: string;
+	failure?: ToolFailure;
 	message: Message;
 	observation: Observation;
 };
@@ -43,11 +45,15 @@ type PreparedToolCall = {
 
 class ToolPreparationError extends Error {
 	readonly args: Record<string, unknown>;
+	readonly original: unknown;
 
 	constructor(caught: unknown, args: Record<string, unknown>) {
-		super(caught instanceof Error ? caught.message : String(caught));
+		super(caught instanceof Error ? caught.message : String(caught), {
+			cause: caught,
+		});
 		this.name = "ToolPreparationError";
 		this.args = args;
+		this.original = caught;
 	}
 }
 
@@ -68,10 +74,12 @@ export async function runToolCall({
 		const prepared = await prepareToolCall(call, tools, context);
 		return await executePreparedToolCall(prepared, lockManager, signal);
 	} catch (caught) {
+		const preparationError =
+			caught instanceof ToolPreparationError ? caught : undefined;
 		return failedToolCallResult(
 			call,
-			caught instanceof ToolPreparationError ? caught.args : {},
-			caught,
+			preparationError?.args ?? {},
+			preparationError?.original ?? caught,
 		);
 	}
 }
@@ -95,11 +103,13 @@ export async function runToolCalls({
 			const next = await prepareToolCall(call, tools, context);
 			prepared.push(next);
 		} catch (caught) {
+			const preparationError =
+				caught instanceof ToolPreparationError ? caught : undefined;
 			prepared.push(
 				failedToolCallResult(
 					call,
-					caught instanceof ToolPreparationError ? caught.args : {},
-					caught,
+					preparationError?.args ?? {},
+					preparationError?.original ?? caught,
 				),
 			);
 		}
@@ -223,11 +233,13 @@ function failedToolCallResult(
 	args: Record<string, unknown>,
 	caught: unknown,
 ): ToolCallResult {
+	const { failure, details } = classifyToolFailure(caught);
 	return createToolCallResult(
 		call,
 		args,
 		false,
-		`error: ${caught instanceof Error ? caught.message : String(caught)}`,
+		`error: ${failure.message}${details ? `\ndetails: ${details}` : ""}`,
+		failure,
 	);
 }
 
@@ -236,19 +248,37 @@ function createToolCallResult(
 	args: Record<string, unknown>,
 	ok: boolean,
 	output: string,
+	failure?: ToolFailure,
 ): ToolCallResult {
+	const classifiedFailure: ToolFailure = failure ?? {
+		kind: "runtime_error",
+		message: "Tool execution failed without a classified error.",
+	};
+	const resultFailure = ok ? undefined : classifiedFailure;
 	const message: Message = {
 		role: "tool",
 		content: output,
 		toolCallId: call.id,
+		toolResult: ok
+			? { status: "succeeded" }
+			: { status: "failed", failure: classifiedFailure },
 	};
 	const observation: Observation = {
 		tool: call.name,
 		args,
 		ok,
 		output,
+		...(resultFailure ? { failure: resultFailure } : {}),
 	};
-	return { call, ok, args, output, message, observation };
+	return {
+		call,
+		ok,
+		args,
+		output,
+		...(resultFailure ? { failure: resultFailure } : {}),
+		message,
+		observation,
+	};
 }
 
 function toolContext(context: ToolStateContext): ToolContext {

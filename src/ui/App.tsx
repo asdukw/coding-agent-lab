@@ -20,10 +20,12 @@ import {
 	continueState,
 	createInitialState,
 	enterPlanMode,
+	type Message,
 	resolvePlanApproval,
 	resolveToolApproval,
 	setApprovalMode as setStateApprovalMode,
 	type ToolApprovalDecision,
+	type ToolFailure,
 } from "../state";
 import { BUILTIN_TOOLS } from "../tools";
 import { type Tools, toToolSpecs } from "../tools/types";
@@ -106,41 +108,242 @@ const PLAN_APPROVAL_OPTIONS: readonly SelectionMenuOption<PlanApprovalChoice>[] 
 		},
 	];
 
-type Turn = {
-	id: string;
-	user: string;
-	assistant: string;
-};
+type TimelineEntry =
+	| {
+			id: string;
+			kind: "message";
+			role: "user" | "assistant" | "agent";
+			content: string;
+	  }
+	| {
+			id: string;
+			kind: "tool_call";
+			callId: string;
+			name: string;
+			arguments: string;
+	  }
+	| {
+			id: string;
+			kind: "tool_result";
+			callId: string;
+			name: string;
+			status: "succeeded" | "failed";
+			content: string;
+			failure?: ToolFailure;
+	  }
+	| {
+			id: string;
+			kind: "approval";
+			content: string;
+	  }
+	| {
+			id: string;
+			kind: "local";
+			command: string;
+			content: string;
+	  };
 
-function historyFromState(state: AgentState | undefined): Turn[] {
+type RunSource =
+	| { kind: "user"; content: string }
+	| { kind: "approval"; content: string }
+	| { kind: "background" };
+
+function timelineFromState(state: AgentState | undefined): TimelineEntry[] {
 	if (!state) {
 		return [];
 	}
 
-	const turns: Turn[] = [];
-	let pendingUser: string | undefined;
-	let id = 0;
+	const entries: TimelineEntry[] = [];
+	const toolNames = new Map<string, string>();
+	for (const [messageIndex, message] of state.messages.entries()) {
+		entries.push(
+			...timelineEntriesForMessage(
+				message,
+				toolNames,
+				`${state.sessionId}:${messageIndex}`,
+			),
+		);
+	}
+	return entries;
+}
 
-	for (const message of state.messages) {
-		if (message.role === "user") {
-			pendingUser = message.content;
-		} else if (message.role === "agent") {
-			pendingUser = "Sub-agent update";
-		} else if (
-			message.role === "assistant" &&
-			pendingUser !== undefined &&
-			message.content.trim()
-		) {
-			turns.push({
-				id: `${state.sessionId}:${id++}`,
-				user: pendingUser,
-				assistant: message.content,
-			});
-			pendingUser = undefined;
-		}
+function timelineEntriesForMessage(
+	message: Message,
+	toolNames: Map<string, string>,
+	idPrefix: string,
+): TimelineEntry[] {
+	const timelineMessage = message;
+	if (timelineMessage.origin === "approval") {
+		return timelineMessage.content.trim()
+			? [
+					{
+						id: `${idPrefix}:approval`,
+						kind: "approval",
+						content: timelineMessage.content,
+					},
+				]
+			: [];
 	}
 
-	return turns;
+	if (timelineMessage.role === "assistant") {
+		const entries: TimelineEntry[] = [];
+		if (timelineMessage.content.trim()) {
+			entries.push({
+				id: `${idPrefix}:assistant`,
+				kind: "message",
+				role: "assistant",
+				content: timelineMessage.content,
+			});
+		}
+		for (const [callIndex, call] of (
+			timelineMessage.toolCalls ?? []
+		).entries()) {
+			toolNames.set(call.id, call.name);
+			entries.push({
+				id: `${idPrefix}:tool-call:${callIndex}:${call.id}`,
+				kind: "tool_call",
+				callId: call.id,
+				name: call.name,
+				arguments: call.arguments,
+			});
+		}
+		return entries;
+	}
+
+	if (timelineMessage.role === "tool") {
+		const callId = timelineMessage.toolCallId ?? "unknown";
+		const status =
+			timelineMessage.toolResult?.status ??
+			(timelineMessage.content.startsWith("error:") ? "failed" : "succeeded");
+		return [
+			{
+				id: `${idPrefix}:tool-result:${callId}`,
+				kind: "tool_result",
+				callId,
+				name: toolNames.get(callId) ?? "Unknown tool",
+				status,
+				content: timelineMessage.content,
+				failure: timelineMessage.toolResult?.failure,
+			},
+		];
+	}
+
+	if (
+		(timelineMessage.role === "user" || timelineMessage.role === "agent") &&
+		timelineMessage.content.trim()
+	) {
+		return [
+			{
+				id: `${idPrefix}:${timelineMessage.role}`,
+				kind: "message",
+				role: timelineMessage.role,
+				content: timelineMessage.content,
+			},
+		];
+	}
+
+	return [];
+}
+
+function appendMessageToTimeline(
+	current: TimelineEntry[],
+	message: Message,
+	sessionId: string,
+): TimelineEntry[] {
+	const toolNames = new Map(
+		current
+			.filter(
+				(entry): entry is Extract<TimelineEntry, { kind: "tool_call" }> =>
+					entry.kind === "tool_call",
+			)
+			.map((entry) => [entry.callId, entry.name]),
+	);
+	return [
+		...current,
+		...timelineEntriesForMessage(
+			message,
+			toolNames,
+			`${sessionId}:live:${current.length}`,
+		),
+	];
+}
+
+function TimelineRow({ entry }: { entry: TimelineEntry }) {
+	if (entry.kind === "message") {
+		const color =
+			entry.role === "user"
+				? "green"
+				: entry.role === "assistant"
+					? "blue"
+					: "magenta";
+		return (
+			<Box flexDirection="column">
+				<Text color={color}>{entry.role}</Text>
+				{entry.role === "user" ? (
+					<Text>{entry.content}</Text>
+				) : (
+					<Markdown>{entry.content}</Markdown>
+				)}
+			</Box>
+		);
+	}
+
+	if (entry.kind === "tool_call") {
+		return (
+			<Box flexDirection="column">
+				<Text>
+					<Text color="cyan">tool request</Text> <Text bold>{entry.name}</Text>
+				</Text>
+				<Text color="gray">{formatApprovalArguments(entry.arguments)}</Text>
+			</Box>
+		);
+	}
+
+	if (entry.kind === "tool_result") {
+		const failed = entry.status === "failed";
+		return (
+			<Box flexDirection="column">
+				<Text>
+					<Text color={failed ? "red" : "green"}>
+						tool result · {entry.status}
+					</Text>{" "}
+					<Text bold>{entry.name}</Text>
+				</Text>
+				{entry.failure ? (
+					<Box flexDirection="column">
+						<Text color="red">
+							{entry.failure.kind}
+							{entry.failure.stage ? ` · ${entry.failure.stage}` : ""}
+							{entry.failure.exitCode === undefined
+								? ""
+								: ` · exit ${entry.failure.exitCode}`}
+						</Text>
+						<Text color="red">{formatTimelineValue(entry.content)}</Text>
+					</Box>
+				) : (
+					<Text color={failed ? "red" : undefined}>
+						{formatTimelineValue(entry.content)}
+					</Text>
+				)}
+			</Box>
+		);
+	}
+
+	if (entry.kind === "approval") {
+		return (
+			<Box flexDirection="column">
+				<Text color="yellow">approval</Text>
+				<Text>{entry.content}</Text>
+			</Box>
+		);
+	}
+
+	return (
+		<Box flexDirection="column">
+			<Text color="cyan">local · {entry.command}</Text>
+			<Markdown>{entry.content}</Markdown>
+		</Box>
+	);
 }
 
 export function App({
@@ -167,8 +370,8 @@ export function App({
 	const [agentState, setAgentState] = useState<AgentState | undefined>(
 		restoredState,
 	);
-	const [history, setHistory] = useState<Turn[]>(
-		historyFromState(restoredState),
+	const [history, setHistory] = useState<TimelineEntry[]>(
+		timelineFromState(restoredState),
 	);
 	const [streamingText, setStreamingText] = useState("");
 	const [status, setStatus] = useState<"idle" | "running">("idle");
@@ -206,8 +409,9 @@ export function App({
 					...current,
 					{
 						id: `local-permissions-${current.length + 1}`,
-						user: "/permissions",
-						assistant: `${option?.label ?? mode}\n\n${option?.description ?? ""}`,
+						kind: "local",
+						command: "/permissions",
+						content: `${option?.label ?? mode}\n\n${option?.description ?? ""}`,
 					},
 				]);
 
@@ -255,8 +459,8 @@ export function App({
 	const runState = useCallback(
 		(
 			initialState: AgentState,
-			userText: string,
 			persistFromMessageIndex: number,
+			source: RunSource,
 		) => {
 			if (
 				runInFlightRef.current ||
@@ -270,6 +474,22 @@ export function App({
 			setStatus("running");
 			setStreamingText("");
 			setError(undefined);
+			setAgentState(initialState);
+			if (source.kind !== "background") {
+				setHistory((current) => {
+					const id = `${initialState.sessionId}:source:${current.length}`;
+					const entry: TimelineEntry =
+						source.kind === "user"
+							? {
+									id,
+									kind: "message",
+									role: "user",
+									content: source.content,
+								}
+							: { id, kind: "approval", content: source.content };
+					return [...current, entry];
+				});
+			}
 
 			let assistantText = "";
 			let latestState = initialState;
@@ -303,13 +523,32 @@ export function App({
 							}
 						} else if (event.type === "message") {
 							await appendSessionMessage(cwd, initialState, event.message);
+							if (!appLifecycle.isClosing) {
+								setHistory((current) =>
+									appendMessageToTimeline(
+										current,
+										event.message,
+										initialState.sessionId,
+									),
+								);
+								if (event.message.role === "assistant") {
+									assistantText = "";
+									setStreamingText("");
+								}
+							}
 						} else if (event.type === "state") {
 							latestState = event.state;
 							await appendSessionState(cwd, event.state);
 							statePersisted = true;
+							if (!appLifecycle.isClosing) {
+								setAgentState(event.state);
+							}
 						} else if (event.type === "compaction") {
 							latestState = event.state;
 							await appendSessionCompaction(cwd, event.state);
+							if (!appLifecycle.isClosing) {
+								setAgentState(event.state);
+							}
 						} else if (event.type === "memory_extraction_request") {
 							if (appLifecycle.isClosing) {
 								continue;
@@ -342,14 +581,6 @@ export function App({
 							}
 							if (!appLifecycle.isClosing) {
 								setAgentState(event.terminal.state);
-								setHistory((current) => [
-									...current,
-									{
-										id: `${event.terminal.state.sessionId}:${event.terminal.state.turn}`,
-										user: userText,
-										assistant: assistantText,
-									},
-								]);
 								setStreamingText("");
 							}
 						}
@@ -391,7 +622,10 @@ export function App({
 				: createInitialState(trimmed, cwd, toToolSpecs(tools));
 			const initialState = setStateApprovalMode(baseState, approvalMode);
 
-			runState(initialState, trimmed, agentState?.messages.length ?? 0);
+			runState(initialState, agentState?.messages.length ?? 0, {
+				kind: "user",
+				content: trimmed,
+			});
 		},
 		[agentState, appLifecycle, approvalMode, cwd, runState, status, tools],
 	);
@@ -444,7 +678,7 @@ export function App({
 		) {
 			return;
 		}
-		runState(agentState, "sub-agent notification", agentState.messages.length);
+		runState(agentState, agentState.messages.length, { kind: "background" });
 	}, [
 		agentInboxRevision,
 		agentRuntime,
@@ -461,11 +695,7 @@ export function App({
 		) {
 			return;
 		}
-		runState(
-			agentState,
-			"refresh restored tool approval",
-			agentState.messages.length,
-		);
+		runState(agentState, agentState.messages.length, { kind: "background" });
 	}, [agentState, runState, status]);
 
 	useEffect(() => {
@@ -500,11 +730,14 @@ export function App({
 			const nextState = resolveToolApproval(agentState, decision);
 			const approvalLabel =
 				decision === "allow_once"
-					? "allow tool calls once"
+					? "Tool calls allowed once"
 					: decision === "allow_session"
-						? "always allow these tools for this session"
-						: "deny tool calls";
-			runState(nextState, approvalLabel, agentState.messages.length);
+						? "Tool calls allowed for this session"
+						: "Tool calls denied";
+			runState(nextState, agentState.messages.length, {
+				kind: "approval",
+				content: approvalLabel,
+			});
 		},
 		[agentState, appLifecycle, pendingToolApproval, runState],
 	);
@@ -530,13 +763,13 @@ export function App({
 				decision,
 				normalizedFeedback,
 			);
-			runState(
-				nextState,
-				decision === "approve"
-					? "approve plan"
-					: `reject plan${normalizedFeedback ? `: ${normalizedFeedback}` : ""}`,
-				agentState.messages.length,
-			);
+			runState(nextState, agentState.messages.length, {
+				kind: "approval",
+				content:
+					decision === "approve"
+						? "Plan approved"
+						: `Plan rejected${normalizedFeedback ? `: ${normalizedFeedback}` : ""}`,
+			});
 		},
 		[agentState, appLifecycle, pendingPlanApproval, runState],
 	);
@@ -599,7 +832,7 @@ export function App({
 						if (!appLifecycle.isClosing) {
 							setApprovalMode("ask");
 							setAgentState(restored);
-							setHistory(historyFromState(restored));
+							setHistory(timelineFromState(restored));
 						}
 					} catch (caught) {
 						if (!appLifecycle.isClosing) {
@@ -639,8 +872,9 @@ export function App({
 								...current,
 								{
 									id: `local-${current.length + 1}`,
-									user: "/memory",
-									assistant: formatMemoryStoreSummary(info),
+									kind: "local",
+									command: "/memory",
+									content: formatMemoryStoreSummary(info),
 								},
 							]);
 						}
@@ -668,8 +902,9 @@ export function App({
 					...current,
 					{
 						id: `local-${current.length + 1}`,
-						user: "/plan",
-						assistant:
+						kind: "local",
+						command: "/plan",
+						content:
 							"Entered plan mode.\n\nThe plan is stored as runtime state only.",
 					},
 				]);
@@ -693,17 +928,8 @@ export function App({
 				{modelName ? <Text color="gray">model: {modelName}</Text> : null}
 			</Box>
 
-			{history.map((turn) => (
-				<Box flexDirection="column" key={turn.id}>
-					<Box flexDirection="column">
-						<Text color="green">user</Text>
-						<Text>{turn.user}</Text>
-					</Box>
-					<Box flexDirection="column">
-						<Text color="blue">assistant</Text>
-						<Markdown>{turn.assistant}</Markdown>
-					</Box>
-				</Box>
+			{history.map((entry) => (
+				<TimelineRow entry={entry} key={entry.id} />
 			))}
 
 			{status === "running" ? (
@@ -856,15 +1082,33 @@ function formatCaught(caught: unknown): string {
 }
 
 function formatApprovalArguments(argumentsText: string): string {
-	let value = argumentsText;
+	return formatTimelineValue(argumentsText);
+}
+
+function formatTimelineValue(text: string): string {
+	let value = text;
 	try {
-		value = JSON.stringify(JSON.parse(argumentsText), null, 2) ?? argumentsText;
+		value = JSON.stringify(JSON.parse(text), null, 2) ?? text;
 	} catch {
-		// Invalid JSON is still shown verbatim and will fail schema validation.
+		// Commands and error output are often plain text; show them verbatim.
 	}
-	return value.replace(
-		/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g,
-		(character) =>
-			`\\u${character.codePointAt(0)?.toString(16).padStart(4, "0")}`,
+	return Array.from(value.replace(/\r\n/g, "\n"), (character) => {
+		const codePoint = character.codePointAt(0) ?? 0;
+		return isUnsafeTimelineCodePoint(codePoint)
+			? `\\u${codePoint.toString(16).padStart(4, "0")}`
+			: character;
+	}).join("");
+}
+
+function isUnsafeTimelineCodePoint(codePoint: number): boolean {
+	return (
+		codePoint <= 0x09 ||
+		(codePoint >= 0x0b && codePoint <= 0x1f) ||
+		(codePoint >= 0x7f && codePoint <= 0x9f) ||
+		codePoint === 0x061c ||
+		codePoint === 0x200e ||
+		codePoint === 0x200f ||
+		(codePoint >= 0x202a && codePoint <= 0x202e) ||
+		(codePoint >= 0x2066 && codePoint <= 0x2069)
 	);
 }
