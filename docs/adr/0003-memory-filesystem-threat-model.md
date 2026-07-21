@@ -34,4 +34,3 @@
 - [`src/memory.ts`](../../src/memory.ts)
 - [`tests/memory.test.ts`](../../tests/memory.test.ts)
 - [`tests/integration/memoryMutationLock.test.ts`](../../tests/integration/memoryMutationLock.test.ts)
-- [`MEMORY_WRITE_FOLLOWUPS.md`](../../MEMORY_WRITE_FOLLOWUPS.md)
