@@ -527,7 +527,7 @@ fn path_prefixes_equal(left: Prefix<'_>, right: Prefix<'_>) -> bool {
         (
             Prefix::Disk(left) | Prefix::VerbatimDisk(left),
             Prefix::Disk(right) | Prefix::VerbatimDisk(right),
-        ) => left.to_ascii_uppercase() == right.to_ascii_uppercase(),
+        ) => left.eq_ignore_ascii_case(&right),
         _ => false,
     }
 }

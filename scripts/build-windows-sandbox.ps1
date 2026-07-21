@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
 	[switch]$Install,
+	[switch]$RunChecks,
 	[string]$CargoTargetDir
 )
 
@@ -141,6 +142,38 @@ $env:Path = "$toolchainBin;$env:Path"
 New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
 Push-Location $targetDir
 try {
+	if ($RunChecks) {
+		& $cargoPath fmt `
+			--manifest-path $manifestPath `
+			--all `
+			-- `
+			--check
+		if ($LASTEXITCODE -ne 0) {
+			throw "Windows sandbox runner formatting check failed with exit code $LASTEXITCODE."
+		}
+
+		& $cargoPath clippy `
+			--manifest-path $manifestPath `
+			--target $target `
+			--target-dir $targetDir `
+			--locked `
+			--all-targets `
+			-- `
+			-D warnings
+		if ($LASTEXITCODE -ne 0) {
+			throw "Windows sandbox runner lint failed with exit code $LASTEXITCODE."
+		}
+
+		& $cargoPath test `
+			--manifest-path $manifestPath `
+			--target $target `
+			--target-dir $targetDir `
+			--locked
+		if ($LASTEXITCODE -ne 0) {
+			throw "Windows sandbox runner tests failed with exit code $LASTEXITCODE."
+		}
+	}
+
 	& $cargoPath build `
 		--manifest-path $manifestPath `
 		--target $target `

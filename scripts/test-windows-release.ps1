@@ -35,6 +35,22 @@ try {
 	if (-not (Test-Path -LiteralPath $runnerPath -PathType Leaf)) {
 		throw "The native sandbox runner is not beside cagent.exe."
 	}
+	$licensePath = Join-Path $cagentFiles[0].DirectoryName "LICENSE"
+	if (-not (Test-Path -LiteralPath $licensePath -PathType Leaf)) {
+		throw "The release archive does not contain the project license."
+	}
+	$thirdPartyNoticesPath = Join-Path `
+		$cagentFiles[0].DirectoryName `
+		"THIRD_PARTY_NOTICES.md"
+	if (-not (Test-Path -LiteralPath $thirdPartyNoticesPath -PathType Leaf)) {
+		throw "The release archive does not contain third-party notices."
+	}
+	$bunLicensePath = Join-Path `
+		$cagentFiles[0].DirectoryName `
+		"THIRD_PARTY_LICENSES\BUN-1.3.14-LICENSE.md"
+	if (-not (Test-Path -LiteralPath $bunLicensePath -PathType Leaf)) {
+		throw "The release archive does not contain Bun's pinned license."
+	}
 
 	[System.IO.File]::WriteAllText((Join-Path $workspaceRoot ".env"), "DEEPSEEK_API_KEY=must-not-be-loaded`n", [System.Text.UTF8Encoding]::new($false))
 	[System.IO.File]::WriteAllText((Join-Path $workspaceRoot "bunfig.toml"), "preload = [`"./preload.ts`"]`n", [System.Text.UTF8Encoding]::new($false))

@@ -1,0 +1,27 @@
+[Script Info]
+Title: Coding Agent Lab offline demo
+ScriptType: v4.00+
+PlayResX: 1280
+PlayResY: 720
+WrapStyle: 2
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Chrome,Segoe UI,22,&H00AAB5C4,&H00AAB5C4,&H000B1020,&H000B1020,0,0,0,0,100,100,0,0,1,0,0,7,48,48,28,1
+Style: Header,Consolas,29,&H00FFFFFF,&H00FFFFFF,&H000B1020,&H000B1020,-1,0,0,0,100,100,0,0,1,0,0,7,52,52,70,1
+Style: Prompt,Consolas,24,&H00E6EDF3,&H00E6EDF3,&H000B1020,&H000B1020,0,0,0,0,100,100,0,0,1,0,0,7,52,52,126,1
+Style: Body,Consolas,23,&H00D6DCE5,&H00D6DCE5,&H000B1020,&H000B1020,0,0,0,0,100,100,0,0,1,0,0,7,52,52,190,1
+Style: Footer,Consolas,19,&H0096A2B4,&H0096A2B4,&H000B1020,&H000B1020,0,0,0,0,100,100,0,0,1,0,0,1,52,52,35,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:00.00,0:00:20.00,Chrome,,0,0,0,,{\c&H0067E8&}●  {\c&H00D35F&}●  {\c&H5ECF6F&}●
+Dialogue: 0,0:00:00.00,0:00:20.00,Header,,0,0,0,,CODING AGENT LAB  /  OFFLINE DEMO
+Dialogue: 0,0:00:00.00,0:00:20.00,Prompt,,0,0,0,,{\c&H70DBFF&}PS>{\c&HFFFFFF&} bun run demo:offline
+Dialogue: 0,0:00:00.00,0:00:03.50,Body,,0,0,0,,Starting deterministic scenario...\N\N{\c&H96A2B4&}No model API key. Temporary workspace only.
+Dialogue: 0,0:00:03.50,0:00:08.00,Body,,0,0,0,,{\c&H70DBFF&}[PLAN]{\c&HD6DCE5&} enter plan -> read fixture -> update plan\N\NTOOL       EnterPlanMode -> Read -> UpdatePlan -> ExitPlanMode\NAPPROVAL   plan=approve\NSTATE      session saved at approval boundary
+Dialogue: 0,0:00:08.00,0:00:12.50,Body,,0,0,0,,{\c&H70DBFF&}[EDIT]{\c&HD6DCE5&} implementation read -> edit -> verification read\N\NTOOL       Read -> Edit -> Read\NAPPROVAL   Edit=allow_once\NCHANGED    src/price.ts\NFIX        1 + discountPercent / 100  ->  1 - discountPercent / 100
+Dialogue: 0,0:00:12.50,0:00:16.50,Body,,0,0,0,,{\c&H70DBFF&}[RESUME]{\c&HD6DCE5&} load saved session -> real follow-up query\N\NSESSION    restored=3x | resumed=yes\NAPPROVALS  cleared=yes\NFLOW       plan gate -> tool gate -> task complete -> resume complete
+Dialogue: 0,0:00:16.50,0:00:20.00,Body,,0,0,0,,{\c&H7EE787&}[PASS] OFFLINE / DETERMINISTIC AGENT DEMO{\c&HD6DCE5&}\N\NMETRICS    requests=10 | tools=8 | turns=10 | cycles=4\NCHECKS     20/20 passed\NSAFETY     model API=not used | shell=not exposed\N           repository fixture=unchanged
+Dialogue: 0,0:00:00.00,0:00:20.00,Footer,,0,0,0,,real Agent Loop  •  approvals  •  file tools  •  Session Store

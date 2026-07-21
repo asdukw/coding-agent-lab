@@ -13,5 +13,8 @@ database.exec("BEGIN IMMEDIATE");
 await writeFile(readyPath, "locked", "utf8");
 
 for (;;) {
+	// Keep the SQLite wrapper live so GC cannot close the connection and roll
+	// back the transaction while this fixture is deliberately idle.
+	database.query("SELECT 1").get();
 	await Bun.sleep(60_000);
 }

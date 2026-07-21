@@ -1,0 +1,160 @@
+{
+  "schemaVersion": 1,
+  "scenario": "plan-edit-session-resume",
+  "scenarioVersion": 1,
+  "status": "passed",
+  "runtime": {
+    "platform": "win32",
+    "bunVersion": "1.3.14"
+  },
+  "model": "offline-demo-scripted",
+  "workspace": "<temporary-workspace>",
+  "durationMs": 1749,
+  "counts": {
+    "queryCycles": 4,
+    "turns": 10,
+    "modelRequests": 10,
+    "toolCalls": 8,
+    "planApprovals": 1,
+    "toolApprovals": 1,
+    "sessionRestores": 3
+  },
+  "requestPhases": [
+    "enter_plan",
+    "plan_read",
+    "update_plan",
+    "exit_plan",
+    "implementation_read",
+    "edit",
+    "verification_read",
+    "complete",
+    "resume_read",
+    "resume_complete"
+  ],
+  "terminalSequence": [
+    "plan_approval",
+    "tool_approval",
+    "complete",
+    "complete"
+  ],
+  "toolSequence": [
+    "EnterPlanMode",
+    "Read",
+    "UpdatePlan",
+    "ExitPlanMode",
+    "Read",
+    "Edit",
+    "Read",
+    "Read"
+  ],
+  "changedFiles": [
+    "src/price.ts"
+  ],
+  "approvals": [
+    {
+      "kind": "plan",
+      "decision": "approve"
+    },
+    {
+      "kind": "tool",
+      "decision": "allow_once",
+      "toolNames": [
+        "Edit"
+      ]
+    }
+  ],
+  "session": {
+    "id": "offline-demo-v1",
+    "restored": true,
+    "resumedAfterRestore": true,
+    "pendingApprovalsCleared": true
+  },
+  "safety": {
+    "modelNetworkUsed": false,
+    "shellToolAvailable": false,
+    "repositoryFixtureUnchanged": true,
+    "reportContainsWorkspacePath": false
+  },
+  "checks": [
+    {
+      "name": "fixture contains exactly one broken expression",
+      "ok": true
+    },
+    {
+      "name": "demo tool surface excludes Shell and MCP",
+      "ok": true
+    },
+    {
+      "name": "query pauses for plan approval",
+      "ok": true
+    },
+    {
+      "name": "plan-boundary restore preserves the persistence cursor",
+      "ok": true
+    },
+    {
+      "name": "pending plan approval survives save and load",
+      "ok": true
+    },
+    {
+      "name": "restored session keeps its stable identity",
+      "ok": true
+    },
+    {
+      "name": "query pauses for one Edit approval",
+      "ok": true
+    },
+    {
+      "name": "approved Edit completes the first task",
+      "ok": true
+    },
+    {
+      "name": "workspace file contains the expected fix",
+      "ok": true
+    },
+    {
+      "name": "completed-session restore preserves the persistence cursor",
+      "ok": true
+    },
+    {
+      "name": "completed transcript restores its answer and changed file",
+      "ok": true
+    },
+    {
+      "name": "restored session accepts a real follow-up query",
+      "ok": true
+    },
+    {
+      "name": "final restore preserves the persistence cursor",
+      "ok": true
+    },
+    {
+      "name": "final restore has no pending approval",
+      "ok": true
+    },
+    {
+      "name": "repository fixture remains unchanged",
+      "ok": true
+    },
+    {
+      "name": "model follows the deterministic transcript phases",
+      "ok": true
+    },
+    {
+      "name": "terminal sequence covers both approvals and resume",
+      "ok": true
+    },
+    {
+      "name": "tool sequence uses only the bounded demo tools",
+      "ok": true
+    },
+    {
+      "name": "exactly one relative file is recorded as changed",
+      "ok": true
+    },
+    {
+      "name": "report omits temporary and repository absolute paths",
+      "ok": true
+    }
+  ]
+}

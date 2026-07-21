@@ -1,14 +1,14 @@
 # Coding Agent Lab
 
 [![CI](https://github.com/asdukw/coding-agent-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/asdukw/coding-agent-lab/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/asdukw/coding-agent-lab?sort=semver)](https://github.com/asdukw/coding-agent-lab/releases/latest)
+[![License](https://img.shields.io/github/license/asdukw/coding-agent-lab)](LICENSE)
 
-> An implementation-driven study of modern coding agents.
->
-> 通过独立实现核心控制面，理解现代 Coding Agent 的工程机制。
+**从零实现的可审批、可恢复、可验证 Coding Agent 控制面。**
 
-Coding Agent Lab 是一个学习型工程项目。Claude Code 与 Codex 是它最重要的学习参照：我已经系统学习了 LLM Agent 的核心理论，希望通过独立设计和实现，把 Agent Loop、工具调用、权限控制、上下文管理、持久化与进程隔离真正落到一个可运行、可测试的系统中。
+Bun / TypeScript 控制 Agent Loop、审批与持久化，Rust / Win32 runner 约束 Windows Shell 的文件写入与进程树；提供无需 API Key 的确定性端到端 Demo 和跨平台 CI 证据。
 
-这个项目不以复刻某个产品或成为商业替代品为目标。它更关注一个问题：**当不可信的模型输出开始读取代码、修改文件和启动进程时，控制面需要建立怎样的边界，才能让整个执行过程可理解、可恢复、可验证？**
+[![Coding Agent Lab offline demo](docs/assets/offline-demo.gif)](docs/demo/offline-demo.sample.md)
 
 ## 60 秒离线体验
 
@@ -29,7 +29,7 @@ Demo 在临时 workspace 中复用真实 Agent Loop、计划审批、文件工�
 
 执行完成后，终端仪表盘会直接展示控制流、模型阶段、工具、审批、Session 恢复、验收与安全边界，同时保留脱敏的 JSON 与 Markdown 报告并打印其临时目录。任一状态转换、工具结果、持久化或恢复断言失败都会展示失败阶段、失败检查与报告位置，并返回非零退出码。CI 会在 Ubuntu 和 Windows 分别执行相同场景，并上传带平台与 run-attempt 标识的 `offline-demo-*` artifact。
 
-离线 Demo 为保证跨平台和确定性，显式只注册 Plan、`Read` 与 `Edit` 工具，不暴露 `Shell`；Windows 原生 Sandbox 由独立 Release runner E2E 验证。
+离线 Demo 为保证跨平台和确定性，显式只注册 Plan、`Read` 与 `Edit` 工具，不暴露 `Shell`；Windows 原生 Sandbox 由独立 Release runner E2E 验证。可直接查看一次真实运行后固化的脱敏报告：[Markdown](docs/demo/offline-demo.sample.md) / [JSON](docs/demo/offline-demo.sample.json)。
 
 ## 真实 DeepSeek 体验（人工审批）
 
@@ -60,9 +60,17 @@ bun run demo:deepseek
 
 更完整的分层与信任边界见 [`docs/architecture.md`](docs/architecture.md)，关键设计取舍记录在 [`docs/adr/`](docs/adr/)。
 
+## 5 分钟看代码
+
+| 阅读入口 | 建议关注 | 设计问题 |
+| --- | --- | --- |
+| [`src/query.ts`](src/query.ts) | Agent Loop、结构化 Tool Call、暂停与继续 | 模型请求如何转化为可审批的状态迁移？ |
+| [`src/sessionStore.ts`](src/sessionStore.ts) | JSONL 事件、尾部修复、快照与恢复校验 | 进程中断后如何可信地恢复，而不是猜测状态？ |
+| [`native/windows-sandbox-runner/src/windows/mod.rs`](native/windows-sandbox-runner/src/windows/mod.rs) | Restricted Token、ACL、Job Object、PowerShell 选择 | 不可信命令启动前，执行边界如何建立并保持？ |
+
 ## Windows x64 发行版
 
-GitHub Release 提供不依赖本机 Bun、npm link 或 shebang 的 Windows x64 ZIP。下载 ZIP 与同名 `.sha256` 后，先校验 SHA256，再解压到目标仓库之外的稳定目录，例如 `%LOCALAPPDATA%\Programs\CodingAgentLab\v0.1.1`。包内的 `cagent.exe` 与 `cagent-windows-sandbox-runner.exe` 必须保持同目录：
+GitHub Release 提供不依赖本机 Bun、npm link 或 shebang 的 Windows x64 ZIP。下载 ZIP 与同名 `.sha256` 后，先校验 SHA256，再解压到目标仓库之外的稳定目录，例如 `%LOCALAPPDATA%\Programs\CodingAgentLab\v0.2.0`。包内的 `cagent.exe` 与 `cagent-windows-sandbox-runner.exe` 必须保持同目录：
 
 ```powershell
 Set-Location C:\path\to\target-repository
@@ -71,13 +79,6 @@ C:\path\to\CodingAgentLab\cagent.exe "分析当前仓库"
 ```
 
 发行 EXE 支持 `--help`、`--version`、`--resume <session-id>` 和 `--memory-check`，不会读取目标 workspace 的 `.env`，也不会经过目标 workspace 的 Bun 启动配置。当前二进制未做代码签名，且 runner 若位于可写 workspace 内会被安全策略拒绝。
-
-## 学习目标
-
-- 将 Agent 理论转化为完整的请求—工具—状态循环，而不只停留在 Prompt 或 API 调用层。
-- 理解现代 Coding Agent 中计划、审批、上下文压缩、记忆与 Sub-agent 的协作方式。
-- 处理真实工程问题：路径边界、并发资源、取消与退出、崩溃恢复、协议校验和跨平台 CI。
-- 对安全能力保持准确表述，明确区分“受控副作用”与“完整恶意代码隔离”。
 
 ## 已实现的内容
 
@@ -199,7 +200,7 @@ bun run build:sandbox
 
 Ubuntu 可以运行控制面和离线测试，但不会注册内置 `Shell` 工具。其他平台尚未作为支持目标验证。
 
-由当前源码构建、使用协议 v3 runner 的发行 ZIP 已包含 runner，不需要本机 Rust 或 Visual Studio，也不强制另行安装 PowerShell 7；标准 Windows 11 可回退到内置 Windows PowerShell 5.1。`Shell` 的首个命令应使用 5.1 兼容语法，返回结果会显式报告所选 engine、兼容版本与 fallback 状态，之后即可按已知引擎生成命令。runner 只在命令启动前选壳，命令一旦开始执行就绝不会换壳重跑。已发布的 v0.1.1 仍使用协议 v2，不包含这项回退能力。
+v0.2.0 发行 ZIP 使用协议 v3 并包含 runner，不需要本机 Rust 或 Visual Studio，也不强制另行安装 PowerShell 7；标准 Windows 11 可回退到内置 Windows PowerShell 5.1。`Shell` 的首个命令应使用 5.1 兼容语法，返回结果会显式报告所选 engine、兼容版本与 fallback 状态，之后即可按已知引擎生成命令。runner 只在命令启动前选壳，命令一旦开始执行就绝不会换壳重跑。
 
 ### 4. 启动
 
@@ -309,6 +310,7 @@ GitHub Actions 当前包含：
 
 - Ubuntu Quality：Biome 与 TypeScript。
 - Ubuntu / Windows：离线 Bun 测试。
+- Ubuntu / Windows：Memory 跨进程事务锁专项测试。
 - Ubuntu / Windows：确定性离线 Demo 与脱敏报告 artifact。
 - Windows 2022：Rust fmt、Clippy、单元测试、Release 构建与真实 Sandbox E2E。
 - `v*` tag：重新执行完整验证，生成 Windows x64 ZIP 与 SHA256，通过打包后 smoke / Sandbox E2E 后发布 GitHub Release。
@@ -354,8 +356,15 @@ docs/                     架构说明与 ADR
 tests/                    Bun 单元测试与 Windows E2E
 ```
 
+## 学习目标
+
+- 将 Agent 理论转化为完整的请求—工具—状态循环，而不只停留在 Prompt 或 API 调用层。
+- 理解现代 Coding Agent 中计划、审批、上下文压缩、记忆与 Sub-agent 的协作方式。
+- 处理真实工程问题：路径边界、并发资源、取消与退出、崩溃恢复、协议校验和跨平台 CI。
+- 对安全能力保持准确表述，明确区分“受控副作用”与“完整恶意代码隔离”。
+
 ## 项目定位与致谢
 
-Claude Code 与 Codex 是本项目的重要学习参照。本项目基于公开文档、公开可观察行为和通用 Agent 工程原理，独立实现 Coding Agent 的核心控制面；项目使用 Ink、MCP SDK、OpenAI SDK、Zod 等通用基础库，与 Anthropic 或 OpenAI 没有关联，也不包含它们的私有实现。
+Coding Agent Lab 是一个学习型工程项目。Claude Code 与 Codex 是本项目的重要学习参照。本项目基于公开文档、公开可观察行为和通用 Agent 工程原理，独立实现 Coding Agent 的核心控制面；项目使用 Ink、MCP SDK、OpenAI SDK、Zod 等通用基础库，与 Anthropic 或 OpenAI 没有关联，也不包含它们的私有实现。
 
-作为学习项目，我更关注理解设计取舍并留下可验证证据，而不是追求功能清单或对外发布。后续工作会继续围绕 ChangeSet/diff 预览、故障注入和性能基线展开。
+作为学习型工程项目，我更关注理解设计取舍并留下可验证证据；公开发行用于提供可复现的验证入口，而不是把项目包装成商业产品替代品。后续工作会继续围绕 ChangeSet/diff 预览、故障注入和性能基线展开。

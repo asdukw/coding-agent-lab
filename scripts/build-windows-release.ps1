@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-	[string]$Version = "0.1.1",
+	[string]$Version = "0.2.0",
 	[string]$OutputDirectory,
 	[switch]$SkipRunnerBuild,
 	[string]$RunnerPath
@@ -75,6 +75,15 @@ try {
 
 	Copy-Item -LiteralPath $resolvedRunnerPath -Destination (Join-Path $packageDirectory "cagent-windows-sandbox-runner.exe")
 	Copy-Item -LiteralPath (Join-Path $repoRoot "docs\release\windows-x64.txt") -Destination (Join-Path $packageDirectory "README.txt")
+	Copy-Item -LiteralPath (Join-Path $repoRoot "LICENSE") -Destination (Join-Path $packageDirectory "LICENSE")
+	Copy-Item `
+		-LiteralPath (Join-Path $repoRoot "THIRD_PARTY_NOTICES.md") `
+		-Destination (Join-Path $packageDirectory "THIRD_PARTY_NOTICES.md")
+	$thirdPartyLicensesDirectory = Join-Path $packageDirectory "THIRD_PARTY_LICENSES"
+	New-Item -ItemType Directory -Path $thirdPartyLicensesDirectory | Out-Null
+	Copy-Item `
+		-LiteralPath (Join-Path $repoRoot "THIRD_PARTY_LICENSES\BUN-1.3.14-LICENSE.md") `
+		-Destination (Join-Path $thirdPartyLicensesDirectory "BUN-1.3.14-LICENSE.md")
 	Compress-Archive -LiteralPath $packageDirectory -DestinationPath $temporaryZip -CompressionLevel Optimal
 	$stream = [System.IO.File]::OpenRead($temporaryZip)
 	try {
