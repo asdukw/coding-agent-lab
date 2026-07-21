@@ -11,7 +11,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseCliArgs } from "../src/main";
+import { CLI_HELP, parseCliArgs } from "../src/main";
 import {
 	appendSessionCompaction,
 	appendSessionMemoryExtraction,
@@ -1049,8 +1049,28 @@ test("parseCliArgs supports resume id and preserves task text", () => {
 		task: undefined,
 		version: true,
 	});
+	expect(parseCliArgs(["--memory-check"])).toEqual({
+		memoryCheck: true,
+		resumeId: undefined,
+		task: undefined,
+	});
 	expect(parseCliArgs(["--", "--resume", "literal-task"])).toEqual({
 		resumeId: undefined,
 		task: "--resume literal-task",
 	});
+	expect(parseCliArgs(["--", "--memory-check"])).toEqual({
+		resumeId: undefined,
+		task: "--memory-check",
+	});
+	expect(() => parseCliArgs(["--memory-check", "task"])).toThrow(
+		"does not accept task text",
+	);
+	expect(() =>
+		parseCliArgs(["--memory-check", "--resume", "session-1"]),
+	).toThrow("cannot be combined with --resume");
+	expect(() => parseCliArgs(["--resume", "--memory-check"])).toThrow(
+		"--resume requires a session id",
+	);
+	expect(CLI_HELP).toContain("cagent --memory-check");
+	expect(CLI_HELP).toContain("2  Scan could not complete safely");
 });

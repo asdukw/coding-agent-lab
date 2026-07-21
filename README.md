@@ -54,6 +54,7 @@ bun run demo:deepseek
 | JSONL Session、崩溃恢复与严格校验 | [`src/sessionStore.ts`](src/sessionStore.ts) | [`tests/sessionStore.test.ts`](tests/sessionStore.test.ts) |
 | Sub-agent、Mailbox 与资源调度 | [`src/agents/`](src/agents/) | [`tests/agentManager.test.ts`](tests/agentManager.test.ts)、[`tests/agentMailbox.test.ts`](tests/agentMailbox.test.ts) |
 | MCP 与长期 Memory | [`src/mcp/`](src/mcp/)、[`src/memory.ts`](src/memory.ts) | [`tests/mcp.test.ts`](tests/mcp.test.ts)、[`tests/memory.test.ts`](tests/memory.test.ts) |
+| 只读 Memory Doctor | [`src/memoryDoctor.ts`](src/memoryDoctor.ts) | [`tests/memoryDoctor.test.ts`](tests/memoryDoctor.test.ts)、[`tests/memoryDoctorCli.test.ts`](tests/memoryDoctorCli.test.ts) |
 | Restricted Token Windows 执行边界 | [`src/sandbox/`](src/sandbox/)、[`native/windows-sandbox-runner/`](native/windows-sandbox-runner/) | [`tests/integration/windowsSandbox.test.ts`](tests/integration/windowsSandbox.test.ts)、[CI](.github/workflows/ci.yml) |
 | 可恢复的确定性端到端场景 | [`src/demo/offlineDemo.ts`](src/demo/offlineDemo.ts)、[`src/demo/scriptedDemoModel.ts`](src/demo/scriptedDemoModel.ts) | `bun run demo:offline`、[CI artifact](.github/workflows/ci.yml) |
 
@@ -69,7 +70,7 @@ C:\path\to\CodingAgentLab\cagent.exe --version
 C:\path\to\CodingAgentLab\cagent.exe "分析当前仓库"
 ```
 
-发行 EXE 支持 `--help`、`--version` 和 `--resume <session-id>`，不会读取目标 workspace 的 `.env`，也不会经过目标 workspace 的 Bun 启动配置。当前二进制未做代码签名，且 runner 若位于可写 workspace 内会被安全策略拒绝。
+发行 EXE 支持 `--help`、`--version`、`--resume <session-id>` 和 `--memory-check`，不会读取目标 workspace 的 `.env`，也不会经过目标 workspace 的 Bun 启动配置。当前二进制未做代码签名，且 runner 若位于可写 workspace 内会被安全策略拒绝。
 
 ## 学习目标
 
@@ -212,6 +213,14 @@ bun run start
 bun run start "分析当前仓库并给出下一步计划"
 ```
 
+无需启动模型、MCP、Windows Sandbox 或交互界面，即可只读检查当前 workspace 的 Memory：
+
+```bash
+bun run start --memory-check
+```
+
+退出码 `0` 表示扫描完成且没有问题，`1` 表示发现可治理问题，`2` 表示扫描无法可信完成，包括路径安全失败、不可读文件、文件系统错误或并发修改。
+
 ## 交互命令
 
 | 输入 | 作用 |
@@ -252,6 +261,7 @@ MCP Server 是外部进程，可能拥有 workspace Sandbox 之外的副作用�
 - 长期 Memory 保存在 `.cagent/memory/`。Memory Agent 只能写入这里；主 Agent 也可以通过经过路径和格式验证的 `Write` / `Edit` 更新 topic 文件。
 - `.cagent/memory/MEMORY.md` 由系统根据 topic frontmatter 自动维护，不能直接修改。
 - Memory mutation 通过 SQLite 锁在同/跨进程间串行化；取得事务后先执行完整性检查，锁库损坏时 fail-closed。`Edit` 将读取、替换、校验、原子写入和索引刷新放在同一事务边界内，并在提交前检测文件身份或内容冲突。
+- `--memory-check` 是严格只读的 Memory Doctor：报告无效 frontmatter、过大或不可读 topic、精确重复、过期 topic，以及索引缺失、错位或漂移；它不会创建 Store、索引、锁库或执行自动修复。
 - Memory Extraction 结果通常写入 Session；若 Session 事件无法持久化，才回退到 `.cagent/audit/memory-extraction/`。
 
 Session、审计和 MCP 配置属于 Agent 控制数据，普通文件工具不能直接访问；`.cagent/memory/` 是唯一受专用验证流程约束的例外。
@@ -264,6 +274,9 @@ bun run check:style
 
 # TypeScript
 bun run check
+
+# 只读 Memory Doctor
+bun run start --memory-check
 
 # 确定性离线端到端 Demo
 bun run demo:offline
@@ -330,6 +343,7 @@ src/
   tools/                  内置工具、审批与资源调度
   ui/                     Ink 终端界面与生命周期
   query.ts                Agent Loop
+  memoryDoctor.ts         只读 Memory 扫描、报告与退出码
   sessionStore.ts         JSONL Session 持久化与恢复
 native/
   windows-sandbox-runner/ Rust / Win32 原生 runner

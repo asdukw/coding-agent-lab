@@ -50,8 +50,12 @@ try {
 			throw "Unexpected version output: $versionOutput"
 		}
 		$helpOutput = (& $cagentPath --help | Out-String)
-		if ($LASTEXITCODE -ne 0 -or $helpOutput -notmatch "Usage:" -or $helpOutput -notmatch "--resume") {
+		if ($LASTEXITCODE -ne 0 -or $helpOutput -notmatch "Usage:" -or $helpOutput -notmatch "--resume" -or $helpOutput -notmatch "--memory-check") {
 			throw "cagent --help did not return the expected usage text."
+		}
+		$memoryCheckOutput = (& $cagentPath --memory-check | Out-String)
+		if ($LASTEXITCODE -ne 0 -or $memoryCheckOutput -notmatch "Memory check: OK" -or $memoryCheckOutput -notmatch "Store: not initialized") {
+			throw "cagent --memory-check did not return a clean read-only report."
 		}
 	} finally {
 		Pop-Location
@@ -67,6 +71,7 @@ try {
 	Write-Output "Windows release smoke test passed."
 	Write-Output "  version: cagent $ExpectedVersion"
 	Write-Output "  runner: sibling executable present"
+	Write-Output "  memory check: clean and read-only"
 	Write-Output "  workspace dotenv/preload: not evaluated"
 } finally {
 	if (Test-Path -LiteralPath $temporaryRoot) {

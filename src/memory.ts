@@ -2,9 +2,11 @@ import { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
 import type { BigIntStats, Dirent } from "node:fs";
 import {
+	lstat,
 	mkdir,
 	open,
 	readdir,
+	realpath,
 	rename,
 	rm,
 	stat,
@@ -25,6 +27,8 @@ const DEFAULT_MEMORY_INDEX_CONTENT = "# Memory\n\n";
 const MAX_MEMORY_INDEX_LINES = 200;
 const MAX_MEMORY_INDEX_BYTES = 25_000;
 const MAX_MEMORY_FILES = 200;
+const MAX_MEMORY_CHECK_ENTRIES = 1_000;
+const MAX_MEMORY_CHECK_DEPTH = 32;
 const FRONTMATTER_MAX_LINES = 40;
 const FRONTMATTER_MAX_BYTES = 16_000;
 export const MAX_MEMORY_TOPIC_BYTES = 256_000;
@@ -100,6 +104,49 @@ export type MemoryHeader = {
 	readFailure?: string;
 	metadata: MemoryMetadata;
 	validationIssues: MemoryValidationIssue[];
+};
+
+export type MemoryCheckIssueCode =
+	| "invalid_frontmatter"
+	| "topic_oversized"
+	| "topic_unreadable"
+	| "topic_expired"
+	| "duplicate_description"
+	| "duplicate_content"
+	| "index_missing"
+	| "index_unreadable"
+	| "index_drift"
+	| "index_misplaced"
+	| "scan_concurrent_modification";
+
+export type MemoryCheckIssue = {
+	code: MemoryCheckIssueCode;
+	severity: "error" | "warning";
+	path: string;
+	message: string;
+	action: string;
+};
+
+export type MemoryCheckReport = {
+	version: 1;
+	cwd: string;
+	memoryDir: string;
+	indexPath: string;
+	storeExists: boolean;
+	complete: boolean;
+	topicCount: number;
+	expiredCount: number;
+	issues: MemoryCheckIssue[];
+};
+
+type MemoryDuplicateIssue = MemoryValidationIssue & {
+	kind: "description" | "content";
+	duplicateOf: string;
+};
+
+type MemoryCheckSnapshot = {
+	files: string[];
+	versions: Map<string, BigIntStats>;
 };
 
 export type RelevantMemory = {
@@ -212,6 +259,199 @@ export async function validateMemoryStore(
 		...topicFiles.flatMap((file) => file.validationIssues),
 		...(await findDuplicateMemoryIssues(topicFiles)),
 	];
+}
+
+export async function checkMemoryStore(
+	cwd: string,
+	now = new Date(),
+): Promise<MemoryCheckReport> {
+	const memoryDir = getMemoryDir(cwd);
+	const indexPath = getMemoryIndexPath(cwd);
+	if (!(await assertMemoryCheckStorePathSafe(cwd, memoryDir))) {
+		return {
+			version: 1,
+			cwd,
+			memoryDir,
+			indexPath,
+			storeExists: false,
+			complete: true,
+			topicCount: 0,
+			expiredCount: 0,
+			issues: [],
+		};
+	}
+
+	const initialSnapshot = await captureMemoryCheckSnapshot(memoryDir);
+	const files = await scanMemoryHeaders(memoryDir, initialSnapshot.files);
+	const rootIndexFilename = await findRootMemoryIndexFilename(
+		memoryDir,
+		indexPath,
+		initialSnapshot,
+	);
+	const rootIndex = files.find((file) => file.filename === rootIndexFilename);
+	const misplacedIndexes = files.filter(
+		(file) =>
+			isMemoryIndexPath(file.filename) && file.filename !== rootIndexFilename,
+	);
+	const topics = files.filter((file) => !isMemoryIndexPath(file.filename));
+	const issues: MemoryCheckIssue[] = [];
+	let complete = true;
+
+	for (const topic of topics) {
+		if (topic.readFailure) {
+			complete = false;
+			issues.push({
+				code: "topic_unreadable",
+				severity: "error",
+				path: topic.filename,
+				message: `Cannot read memory topic: ${topic.readFailure}`,
+				action:
+					"Restore read access or quarantine the topic, then check again.",
+			});
+			continue;
+		}
+		if (topic.sizeBytes > MAX_MEMORY_TOPIC_BYTES) {
+			issues.push({
+				code: "topic_oversized",
+				severity: "error",
+				path: topic.filename,
+				message: `Memory topic is ${topic.sizeBytes} bytes; the limit is ${MAX_MEMORY_TOPIC_BYTES}.`,
+				action: "Split or quarantine the topic before rebuilding the index.",
+			});
+		}
+		for (const validationIssue of topic.validationIssues) {
+			if (validationIssue.message.includes("must not exceed")) {
+				continue;
+			}
+			issues.push({
+				code: "invalid_frontmatter",
+				severity: "error",
+				path: topic.filename,
+				message: validationIssue.message,
+				action: "Fix the topic frontmatter and run the memory check again.",
+			});
+		}
+		if (isMemoryExpired(topic.metadata, now)) {
+			issues.push({
+				code: "topic_expired",
+				severity: "warning",
+				path: topic.filename,
+				message: `Memory topic expired at ${topic.metadata.ttl}.`,
+				action: "Review and remove or archive the expired topic.",
+			});
+		}
+	}
+
+	for (const duplicate of await findDuplicateMemoryDetails(topics)) {
+		issues.push({
+			code:
+				duplicate.kind === "description"
+					? "duplicate_description"
+					: "duplicate_content",
+			severity: "error",
+			path: duplicate.path,
+			message: duplicate.message,
+			action: `Review and merge this topic with ${duplicate.duplicateOf}.`,
+		});
+	}
+
+	for (const misplaced of misplacedIndexes) {
+		if (misplaced.readFailure) {
+			complete = false;
+		}
+		issues.push({
+			code: "index_misplaced",
+			severity: "error",
+			path: misplaced.filename,
+			message: `${MEMORY_ENTRYPOINT_NAME} is reserved for the memory root.`,
+			action: "Rename or quarantine the misplaced reserved index file.",
+		});
+	}
+
+	if (!rootIndex) {
+		issues.push({
+			code: "index_missing",
+			severity: "error",
+			path: MEMORY_ENTRYPOINT_NAME,
+			message: "The managed memory index is missing.",
+			action: "Rebuild the index from topic frontmatter.",
+		});
+	} else if (rootIndex.readFailure) {
+		complete = false;
+		issues.push({
+			code: "index_unreadable",
+			severity: "error",
+			path: MEMORY_ENTRYPOINT_NAME,
+			message: `Cannot read the managed memory index: ${rootIndex.readFailure}`,
+			action: "Restore read access, then rebuild the index.",
+		});
+	} else {
+		try {
+			const expectedIndex = formatMemoryIndex(topics, now);
+			const expectedBytes = Buffer.byteLength(expectedIndex, "utf8");
+			const actualIndex =
+				rootIndex.sizeBytes === expectedBytes
+					? await readTextPrefix(indexPath, expectedBytes)
+					: undefined;
+			if (
+				!topics.some((topic) => topic.readFailure) &&
+				(rootIndex.sizeBytes !== expectedBytes ||
+					actualIndex?.truncated ||
+					actualIndex?.content !== expectedIndex)
+			) {
+				issues.push({
+					code: "index_drift",
+					severity: "error",
+					path: MEMORY_ENTRYPOINT_NAME,
+					message: "The managed memory index does not match current topics.",
+					action: "Rebuild the index from current topic frontmatter.",
+				});
+			}
+		} catch (caught) {
+			complete = false;
+			issues.push({
+				code: "index_unreadable",
+				severity: "error",
+				path: MEMORY_ENTRYPOINT_NAME,
+				message: `Cannot read the managed memory index: ${formatCaught(caught)}`,
+				action: "Restore read access, then rebuild the index.",
+			});
+		}
+	}
+
+	try {
+		const storeStillExists = await assertMemoryCheckStorePathSafe(
+			cwd,
+			memoryDir,
+		);
+		const finalSnapshot = storeStillExists
+			? await captureMemoryCheckSnapshot(memoryDir)
+			: undefined;
+		if (
+			!finalSnapshot ||
+			!sameMemoryCheckSnapshot(initialSnapshot, finalSnapshot)
+		) {
+			replaceWithConcurrentModificationIssue(issues);
+			complete = false;
+		}
+	} catch (caught) {
+		replaceWithConcurrentModificationIssue(issues, formatCaught(caught));
+		complete = false;
+	}
+
+	issues.sort(compareMemoryCheckIssues);
+	return {
+		version: 1,
+		cwd,
+		memoryDir,
+		indexPath,
+		storeExists: true,
+		complete,
+		topicCount: topics.length,
+		expiredCount: topics.filter((topic) => isMemoryExpired(topic.metadata, now))
+			.length,
+		issues,
+	};
 }
 
 export async function validateMemoryWrite(
@@ -766,6 +1006,246 @@ export function formatRelevantMemoriesPrompt(
 	].join("\n");
 }
 
+async function assertMemoryCheckStorePathSafe(
+	cwd: string,
+	memoryDir: string,
+): Promise<boolean> {
+	const resolvedCwd = resolve(cwd);
+	const resolvedMemoryDir = resolve(memoryDir);
+	const controlDir = dirname(resolvedMemoryDir);
+	if (!isPathInside(resolvedMemoryDir, resolvedCwd)) {
+		throw new Error(`Memory path escapes the workspace: ${memoryDir}`);
+	}
+
+	let controlStat: Awaited<ReturnType<typeof lstat>>;
+	try {
+		controlStat = await lstat(controlDir);
+	} catch (caught) {
+		if (hasErrnoCode(caught, "ENOENT")) {
+			return false;
+		}
+		throw caught;
+	}
+	if (controlStat.isSymbolicLink()) {
+		throw new Error(
+			`Memory check refuses symbolic links or junctions: ${controlDir}`,
+		);
+	}
+	if (!controlStat.isDirectory()) {
+		throw new Error(`Memory control path is not a directory: ${controlDir}`);
+	}
+
+	let memoryStat: Awaited<ReturnType<typeof lstat>>;
+	try {
+		memoryStat = await lstat(resolvedMemoryDir);
+	} catch (caught) {
+		if (hasErrnoCode(caught, "ENOENT")) {
+			return false;
+		}
+		if (hasErrnoCode(caught, "ENOTDIR")) {
+			throw new Error(
+				`Memory store path has a parent that is not a directory: ${memoryDir}`,
+				{ cause: caught },
+			);
+		}
+		throw caught;
+	}
+	if (memoryStat.isSymbolicLink()) {
+		throw new Error(
+			`Memory check refuses symbolic links or junctions: ${memoryDir}`,
+		);
+	}
+	if (!memoryStat.isDirectory()) {
+		throw new Error(`Memory path is not a directory: ${memoryDir}`);
+	}
+
+	const [realCwd, realControlDir, realMemoryDir] = await Promise.all([
+		realpath(resolvedCwd),
+		realpath(controlDir),
+		realpath(resolvedMemoryDir),
+	]);
+	if (!isPathInside(realControlDir, realCwd)) {
+		throw new Error(`Memory control path escapes the workspace: ${controlDir}`);
+	}
+	if (!isPathInside(realMemoryDir, realControlDir)) {
+		throw new Error(`Memory path escapes its control directory: ${memoryDir}`);
+	}
+	return true;
+}
+
+async function captureMemoryCheckSnapshot(
+	memoryDir: string,
+): Promise<MemoryCheckSnapshot> {
+	const files: string[] = [];
+	const versions = new Map<string, BigIntStats>();
+	const realMemoryDir = await realpath(memoryDir);
+	let entryCount = 0;
+
+	async function walk(
+		directoryPath: string,
+		relativeDirectory: string,
+		depth: number,
+	) {
+		if (depth > MAX_MEMORY_CHECK_DEPTH) {
+			throw new Error(
+				`memory store nesting exceeds ${MAX_MEMORY_CHECK_DEPTH} directories`,
+			);
+		}
+		const directoryStat = await lstat(directoryPath, { bigint: true });
+		if (directoryStat.isSymbolicLink()) {
+			throw new Error(
+				`Memory check refuses symbolic links or junctions: ${directoryPath}`,
+			);
+		}
+		if (!directoryStat.isDirectory()) {
+			throw new Error(`Memory path is not a directory: ${directoryPath}`);
+		}
+		const realDirectory = await realpath(directoryPath);
+		if (!isPathInside(realDirectory, realMemoryDir)) {
+			throw new Error(
+				`Memory directory escapes the memory store: ${directoryPath}`,
+			);
+		}
+		versions.set(`directory:${relativeDirectory || "."}`, directoryStat);
+
+		const entries: Dirent[] = await readdir(directoryPath, {
+			withFileTypes: true,
+		});
+		for (const entry of entries) {
+			entryCount++;
+			if (entryCount > MAX_MEMORY_CHECK_ENTRIES) {
+				throw new Error(
+					`memory store contains more than ${MAX_MEMORY_CHECK_ENTRIES} entries`,
+				);
+			}
+			const fullPath = join(directoryPath, entry.name);
+			const entryStat = await lstat(fullPath, { bigint: true });
+			const relativePath = relative(memoryDir, fullPath).replace(/\\/g, "/");
+			if (entryStat.isSymbolicLink()) {
+				throw new Error(
+					`Memory check refuses symbolic links or junctions: ${relativePath}`,
+				);
+			}
+			if (entryStat.isDirectory()) {
+				await walk(fullPath, relativePath, depth + 1);
+				continue;
+			}
+			if (entry.name.toLowerCase().endsWith(".md")) {
+				if (!entryStat.isFile()) {
+					throw new Error(
+						`Memory markdown entry is not a regular file: ${relativePath}`,
+					);
+				}
+				files.push(relativePath);
+				versions.set(`file:${relativePath}`, entryStat);
+			}
+		}
+	}
+
+	await walk(memoryDir, "", 0);
+	if (files.length > MAX_MEMORY_FILES) {
+		throw new Error(
+			`memory store contains ${files.length} markdown files; limit is ${MAX_MEMORY_FILES}`,
+		);
+	}
+	return { files: sortMemoryFilenames(files), versions };
+}
+
+function sameMemoryCheckSnapshot(
+	left: MemoryCheckSnapshot,
+	right: MemoryCheckSnapshot,
+): boolean {
+	if (left.versions.size !== right.versions.size) {
+		return false;
+	}
+	for (const [path, leftVersion] of left.versions) {
+		const rightVersion = right.versions.get(path);
+		if (!rightVersion || !sameMemoryCheckVersion(leftVersion, rightVersion)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+function sameMemoryCheckVersion(
+	left: BigIntStats,
+	right: BigIntStats,
+): boolean {
+	return (
+		left.dev === right.dev &&
+		left.ino === right.ino &&
+		left.size === right.size &&
+		left.mtimeNs === right.mtimeNs &&
+		left.ctimeNs === right.ctimeNs
+	);
+}
+
+async function findRootMemoryIndexFilename(
+	memoryDir: string,
+	indexPath: string,
+	snapshot: MemoryCheckSnapshot,
+): Promise<string | undefined> {
+	const candidates = snapshot.files
+		.filter(
+			(filename) => !filename.includes("/") && isMemoryIndexPath(filename),
+		)
+		.sort((left, right) => {
+			if (left === MEMORY_ENTRYPOINT_NAME) {
+				return -1;
+			}
+			if (right === MEMORY_ENTRYPOINT_NAME) {
+				return 1;
+			}
+			return left.localeCompare(right);
+		});
+	if (candidates.length === 0) {
+		return undefined;
+	}
+
+	let indexStat: BigIntStats;
+	try {
+		indexStat = await lstat(indexPath, { bigint: true });
+	} catch (caught) {
+		if (hasErrnoCode(caught, "ENOENT") || hasErrnoCode(caught, "ENOTDIR")) {
+			return undefined;
+		}
+		throw caught;
+	}
+	for (const candidate of candidates) {
+		const candidateStat = snapshot.versions.get(`file:${candidate}`);
+		if (
+			candidateStat &&
+			candidateStat.ino !== 0n &&
+			indexStat.ino !== 0n &&
+			candidateStat.dev === indexStat.dev &&
+			candidateStat.ino === indexStat.ino
+		) {
+			return candidate;
+		}
+	}
+
+	const realIndexPath = await realpath(indexPath);
+	for (const candidate of candidates) {
+		if ((await realpath(join(memoryDir, candidate))) === realIndexPath) {
+			return candidate;
+		}
+	}
+	return undefined;
+}
+
+function replaceWithConcurrentModificationIssue(
+	issues: MemoryCheckIssue[],
+	detail?: string,
+): void {
+	issues.splice(0, issues.length, {
+		code: "scan_concurrent_modification",
+		severity: "error",
+		path: ".",
+		message: `Memory store changed while it was being scanned${detail ? `: ${detail}` : "."}`,
+		action: "Wait for memory mutations to finish, then run the check again.",
+	});
+}
+
 async function listMemoryFiles(memoryDir: string): Promise<string[]> {
 	const files: string[] = [];
 
@@ -788,12 +1268,15 @@ async function listMemoryFiles(memoryDir: string): Promise<string[]> {
 			`memory store contains ${files.length} markdown files; limit is ${MAX_MEMORY_FILES}`,
 		);
 	}
+	return sortMemoryFilenames(files);
+}
+
+function sortMemoryFilenames(files: string[]): string[] {
 	return files.sort((a, b) => {
-		if (isMemoryIndexPath(a)) {
-			return -1;
-		}
-		if (isMemoryIndexPath(b)) {
-			return 1;
+		const leftIsIndex = isMemoryIndexPath(a);
+		const rightIsIndex = isMemoryIndexPath(b);
+		if (leftIsIndex !== rightIsIndex) {
+			return leftIsIndex ? -1 : 1;
 		}
 		return a.localeCompare(b);
 	});
@@ -1030,9 +1513,9 @@ function formatMemoryFileSummary(memory: MemoryHeader): string {
 	return `${memory.filename}${suffix}`;
 }
 
-function formatMemoryIndex(memories: MemoryHeader[]): string {
+function formatMemoryIndex(memories: MemoryHeader[], now = new Date()): string {
 	const visibleMemories = memories
-		.filter((memory) => !isMemoryExpired(memory.metadata))
+		.filter((memory) => !isMemoryExpired(memory.metadata, now))
 		.sort((a, b) => a.filename.localeCompare(b.filename));
 	if (visibleMemories.length === 0) {
 		return DEFAULT_MEMORY_INDEX_CONTENT;
@@ -1143,7 +1626,18 @@ async function assertOpenedMemoryTempFile(
 async function findDuplicateMemoryIssues(
 	memories: MemoryHeader[],
 ): Promise<MemoryValidationIssue[]> {
-	const issues: MemoryValidationIssue[] = [];
+	return (await findDuplicateMemoryDetails(memories)).map(
+		({ path, message }) => ({
+			path,
+			message,
+		}),
+	);
+}
+
+async function findDuplicateMemoryDetails(
+	memories: MemoryHeader[],
+): Promise<MemoryDuplicateIssue[]> {
+	const issues: MemoryDuplicateIssue[] = [];
 	const descriptions = new Map<string, string>();
 	const bodies = new Map<string, string>();
 
@@ -1157,6 +1651,8 @@ async function findDuplicateMemoryIssues(
 				issues.push({
 					path: memory.filename,
 					message: `duplicates existing memory description in ${existing}`,
+					kind: "description",
+					duplicateOf: existing,
 				});
 			} else {
 				descriptions.set(description, memory.filename);
@@ -1174,6 +1670,8 @@ async function findDuplicateMemoryIssues(
 				issues.push({
 					path: memory.filename,
 					message: `duplicates existing memory content in ${existing}`,
+					kind: "content",
+					duplicateOf: existing,
 				});
 			} else {
 				bodies.set(body, memory.filename);
@@ -1182,6 +1680,17 @@ async function findDuplicateMemoryIssues(
 	}
 
 	return issues;
+}
+
+function compareMemoryCheckIssues(
+	left: MemoryCheckIssue,
+	right: MemoryCheckIssue,
+): number {
+	return (
+		left.path.localeCompare(right.path) ||
+		left.code.localeCompare(right.code) ||
+		left.message.localeCompare(right.message)
+	);
 }
 
 function normalizeDuplicateKey(value: string): string {

@@ -1,6 +1,6 @@
 # Memory 写入层后续计划
 
-状态：P0 威胁模型和全部 P1 写入并发语义已完成；下一阶段为 P2 存量治理与失败重试能力。
+状态：P0、P1 与 P2 只读 Memory Doctor 已完成；下一阶段为需要显式确认的修复/quarantine，以及失败抽取重试能力。
 
 ## P0：明确并收紧本地文件系统攻击模型
 
@@ -28,6 +28,8 @@
 
 ## P2：加强重复与存量治理
 
+状态：只读扫描已完成。`--memory-check` 以稳定问题代码报告 frontmatter、大小、可读性、精确重复、过期状态和索引漂移，且不会创建或修改 Memory Store；近义 fingerprint、安全修复和 quarantine 仍待实现。
+
 - 在现有 description/body 精确去重之外，增加可解释的主题 fingerprint 或“候选 topic 必须先 Read”的强制记录，减少近义重复。
 - 提供存量扫描/迁移命令：列出失效 frontmatter、过大文件、重复 topic 和可重建索引；支持安全修复或 quarantine。
 - 验收：迁移前后可审计，旧文件问题不会被静默忽略。
@@ -40,5 +42,5 @@
 
 ## 后续执行顺序
 
-1. 先实现 P2 存量扫描与只读报告，确定迁移输入和审计格式。
-2. 再增加显式确认后的安全修复、quarantine 和 Memory Extraction 重试入口。
+1. 基于 Memory Doctor 的结构化结果，增加显式确认后的安全修复与 quarantine。
+2. 增加 Memory Extraction 失败查看和重试入口，并复用相同审计格式。

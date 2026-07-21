@@ -1,5 +1,9 @@
 import { render } from "ink";
 import { discoverMcpTools } from "./mcp/client";
+import {
+	type MemoryCheckExitCode,
+	runMemoryCheckCommand,
+} from "./memoryDoctor";
 import { createModelClientFromEnv } from "./model";
 import { initializeWindowsSandbox } from "./sandbox";
 import { loadSession } from "./sessionStore";
@@ -12,6 +16,7 @@ export type CliArgs = {
 	resumeId?: string;
 	help?: boolean;
 	version?: boolean;
+	memoryCheck?: boolean;
 };
 
 export const CLI_HELP = `Coding Agent Lab
@@ -19,6 +24,7 @@ export const CLI_HELP = `Coding Agent Lab
 Usage:
   cagent [task]
   cagent --resume <session-id> [task]
+  cagent --memory-check
   cagent --help
   cagent --version
 
@@ -26,6 +32,12 @@ Options:
   -h, --help                 Show this help
   -V, --version              Show the installed version
       --resume <session-id>  Resume a saved workspace session
+      --memory-check         Check workspace memory without modifying files
+
+Memory check exit codes:
+  0  Scan completed with no issues
+  1  Scan completed and found governance issues
+  2  Scan could not complete safely
 
 Model environment:
   DEEPSEEK_API_KEY           Enable the real DeepSeek model
@@ -41,6 +53,7 @@ export function parseCliArgs(args: string[]): CliArgs {
 	let resumeId: string | undefined;
 	let help = false;
 	let version = false;
+	let memoryCheck = false;
 	let parseOptions = true;
 
 	for (let index = 0; index < args.length; index++) {
@@ -51,11 +64,14 @@ export function parseCliArgs(args: string[]): CliArgs {
 			help = true;
 		} else if (parseOptions && (arg === "--version" || arg === "-V")) {
 			version = true;
+		} else if (parseOptions && arg === "--memory-check") {
+			memoryCheck = true;
 		} else if (parseOptions && arg === "--resume") {
-			const next = args[++index];
-			if (!next) {
+			const next = args[index + 1];
+			if (!next || isRecognizedCliOption(next)) {
 				throw new Error("--resume requires a session id");
 			}
+			index++;
 			resumeId = next;
 		} else if (parseOptions && arg?.startsWith("--resume=")) {
 			resumeId = arg.slice("--resume=".length);
@@ -67,26 +83,55 @@ export function parseCliArgs(args: string[]): CliArgs {
 		}
 	}
 
+	const task = taskParts.join(" ") || undefined;
+	if (memoryCheck && !help && !version) {
+		if (resumeId) {
+			throw new Error("--memory-check cannot be combined with --resume");
+		}
+		if (task) {
+			throw new Error("--memory-check does not accept task text");
+		}
+	}
+
 	return {
-		task: taskParts.join(" ") || undefined,
+		task,
 		resumeId,
 		...(help ? { help: true } : {}),
 		...(version ? { version: true } : {}),
+		...(memoryCheck ? { memoryCheck: true } : {}),
 	};
 }
 
-export async function runCli(args = process.argv.slice(2)): Promise<void> {
-	const { task, resumeId, help, version } = parseCliArgs(args);
+function isRecognizedCliOption(value: string): boolean {
+	return (
+		value === "--" ||
+		value === "--help" ||
+		value === "-h" ||
+		value === "--version" ||
+		value === "-V" ||
+		value === "--memory-check" ||
+		value === "--resume" ||
+		value.startsWith("--resume=")
+	);
+}
+
+export async function runCli(
+	args = process.argv.slice(2),
+): Promise<MemoryCheckExitCode> {
+	const { task, resumeId, help, version, memoryCheck } = parseCliArgs(args);
 	if (help) {
 		process.stdout.write(`${CLI_HELP}\n`);
-		return;
+		return 0;
 	}
 	if (version) {
 		process.stdout.write(`cagent ${CAGENT_VERSION}\n`);
-		return;
+		return 0;
 	}
 
 	const cwd = process.cwd();
+	if (memoryCheck) {
+		return runMemoryCheckCommand({ cwd });
+	}
 	if (process.platform === "win32") {
 		await initializeWindowsSandbox(cwd);
 	}
@@ -118,11 +163,16 @@ export async function runCli(args = process.argv.slice(2)): Promise<void> {
 	} finally {
 		await lifecycle.shutdown();
 	}
+	return 0;
 }
 
 if (import.meta.main) {
-	runCli().catch((caught) => {
-		console.error(caught instanceof Error ? caught.message : String(caught));
-		process.exitCode = 1;
-	});
+	runCli()
+		.then((exitCode) => {
+			process.exitCode = exitCode;
+		})
+		.catch((caught) => {
+			console.error(caught instanceof Error ? caught.message : String(caught));
+			process.exitCode = 1;
+		});
 }

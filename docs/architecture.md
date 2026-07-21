@@ -20,7 +20,7 @@ Coding Agent Lab 通过独立实现控制面，研究不可信模型输出如何
 - 权限与工具调度：[`src/tools/permissions.ts`](../src/tools/permissions.ts)、[`src/tools/runner.ts`](../src/tools/runner.ts)
 - Session：[`src/sessionStore.ts`](../src/sessionStore.ts)
 - Sub-agent：[`src/agents/`](../src/agents/)
-- MCP 与 Memory：[`src/mcp/`](../src/mcp/)、[`src/memory.ts`](../src/memory.ts)
+- MCP 与 Memory：[`src/mcp/`](../src/mcp/)、[`src/memory.ts`](../src/memory.ts)、[`src/memoryDoctor.ts`](../src/memoryDoctor.ts)
 - Windows 执行边界：[`src/sandbox/`](../src/sandbox/)、[`native/windows-sandbox-runner/`](../native/windows-sandbox-runner/)
 
 ## 请求到副作用
@@ -46,6 +46,7 @@ Coding Agent Lab 通过独立实现控制面，研究不可信模型输出如何
 - Sub-agent 由 [`src/agents/manager.ts`](../src/agents/manager.ts) 管理，并通过 [`src/agents/mailbox.ts`](../src/agents/mailbox.ts) 与父 Agent 通知协作。
 - 工具资源由 [`src/tools/resourceLock.ts`](../src/tools/resourceLock.ts) 协调，持锁后仍需对关键路径身份重新校验。
 - Memory mutation 另通过 SQLite `BEGIN IMMEDIATE` 协调多个 cagent 进程；取得事务后用 `PRAGMA quick_check` 验证锁库，损坏时 fail-closed。Memory Edit 的读取、校验、写入和索引刷新共享一个锁边界，并在提交前验证文件版本。
+- Memory Doctor 直接执行有界只读扫描，不调用 Store 初始化或 mutation lock，因此不会创建目录、索引、SQLite 锁库或临时文件。它复用 topic 校验、精确去重和索引生成语义；路径安全失败、不可读文件、文件系统错误或并发修改导致的不完整扫描统一映射为退出码 `2`。
 
 持久化选择及故障语义见 [ADR 0002](adr/0002-jsonl-session-recovery-semantics.md)。
 Memory 的本地文件系统攻击者范围与残余 TOCTOU 风险见 [ADR 0003](adr/0003-memory-filesystem-threat-model.md)。
@@ -64,7 +65,7 @@ runner 的目标是限制本地文件写入并管理普通子进程树生命周�
 | Plan Mode 与危险工具审批 | [`tests/planMode.test.ts`](../tests/planMode.test.ts)、[`tests/permissionApproval.test.ts`](../tests/permissionApproval.test.ts) |
 | Session 写入、恢复与损坏处理 | [`tests/sessionStore.test.ts`](../tests/sessionStore.test.ts) |
 | Sub-agent 与 Mailbox | [`tests/agentManager.test.ts`](../tests/agentManager.test.ts)、[`tests/agentMailbox.test.ts`](../tests/agentMailbox.test.ts) |
-| MCP 与 Memory | [`tests/mcp.test.ts`](../tests/mcp.test.ts)、[`tests/memory.test.ts`](../tests/memory.test.ts)、[`tests/integration/memoryMutationLock.test.ts`](../tests/integration/memoryMutationLock.test.ts) |
+| MCP 与 Memory | [`tests/mcp.test.ts`](../tests/mcp.test.ts)、[`tests/memory.test.ts`](../tests/memory.test.ts)、[`tests/memoryDoctor.test.ts`](../tests/memoryDoctor.test.ts)、[`tests/memoryDoctorCli.test.ts`](../tests/memoryDoctorCli.test.ts)、[`tests/integration/memoryMutationLock.test.ts`](../tests/integration/memoryMutationLock.test.ts) |
 | Windows restricted-token 执行边界 | [`tests/integration/windowsSandbox.test.ts`](../tests/integration/windowsSandbox.test.ts) 与 [CI](../.github/workflows/ci.yml) 的 Windows release runner E2E |
 
 确定性离线 Demo（[`src/demo/offlineDemo.ts`](../src/demo/offlineDemo.ts)）用于证明 Agent Loop、审批、文件工具和 Session 恢复能够端到端协作。为保证跨平台、无密钥和结果可重复，它刻意不调用 `Shell`，因此**不证明 Windows Sandbox 生效**；Windows 边界只由原生单元测试和真实 runner E2E 提供证据。
