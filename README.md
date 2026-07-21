@@ -31,14 +31,35 @@ Demo 在临时 workspace 中复用真实 Agent Loop、计划审批、文件工�
 
 真实模型人工审批场景使用 `bun run demo:deepseek`，配置方式见[使用指南](docs/usage.md#demo)。
 
-## 设计目标
+## 为什么做这个项目
 
-这个项目关注 Coding Agent 中模型调用之外的工程问题：
+起点不是“再做一个模型聊天壳”，而是我在 Windows 上使用 Coding Agent 时反复遇到的 PowerShell 问题。
 
-- **受控副作用**：不可信模型输出必须经过 Schema、状态机、权限策略和路径边界才能执行。
-- **可恢复执行**：计划审批、工具批次、Session 和 Memory 都有明确的暂停、恢复与失败语义。
-- **可验证主张**：核心能力对应源码入口、自动化测试和确定性 Demo，不用无法复现的演示代替证据。
-- **准确的安全表述**：区分 workspace 写入约束、审批控制与完整恶意代码隔离。
+我们无法验证模型训练语料中 Bash 的实际占比，但可观察到的结果很明确：Agent 经常优先生成 `export`、`VAR=value command`、heredoc、GNU 参数等 Bash 写法。标准 Windows 环境不保证存在 Bash；WSL 与 Git Bash 都是额外依赖，也会引入路径转换、进程边界和两套工具链。即使命令已经是 PowerShell，PowerShell 7 与系统自带 Windows PowerShell 5.1 之间仍存在语法和行为差异，例如 `&&` 不能直接用于 5.1。
+
+这使问题从“怎样提示模型写对命令”升级为三个控制面问题：
+
+1. Agent 怎样知道当前真正可用的是 `pwsh` 7 还是 Windows PowerShell 5.1？
+2. fallback 怎样只发生在进程启动前，避免失败命令被换壳重放并重复产生副作用？
+3. 面对可以启动脚本、包管理器和任意子进程的 Shell，怎样实施权限边界，而不是维护一份脆弱的命令字符串白名单？
+
+Coding Agent Lab 因此把重点放在模型之外：让环境可观测，让权限可执行，让失败可恢复。runner 会先解析受信任的 PowerShell 7，未解析到可信候选时才回退到系统 PowerShell 5.1；每次结果都报告实际 engine 与 fallback 状态。选择只发生在启动前，命令一旦开始执行就绝不换壳重跑。
+
+## 设计取舍：Claude Code、Codex 与原生 Windows
+
+项目没有完整照搬某一个产品，而是针对不同问题选择公开、可验证的设计：
+
+| 参照 | 借鉴的设计 | 选择原因 |
+| --- | --- | --- |
+| Claude Code | Plan Mode；sandbox 内自动执行；显式 sandbox bypass 回到审批流 | 将“先理解和审阅计划”与“开始产生副作用”分开；让真实边界替代逐命令确认，降低审批疲劳 |
+| Codex | sandbox mode 与 approval policy 分轴；`workspace-write + on-request`；原生 Windows 的 restricted-token / ACL fallback；`AGENTS.md` | sandbox 决定技术上能做什么，approval 决定何时停下来问；同时提供可落地的 Win32 隔离原语 |
+| 本项目 | 原生 Win32 runner；PowerShell 7 → 5.1 的启动前 fallback；分层读取 `AGENTS.md`，并在同目录缺少时兼容 `CLAUDE.md` | 保留 Windows 原生工具链，不要求 WSL；兼容两类项目约定；让失败和权限语义由控制面统一管理 |
+
+精准权限控制的取舍是：**不尝试完整理解 PowerShell，而是在更低层限制它能影响什么。** `Read` / `Write` / `Edit` 由可信 Bun 控制面执行规范路径检查；Shell 及其普通子进程由 restricted token、路径作用域 ACL、继承句柄白名单和 Job Object 约束。`auto` 模式允许 sandbox 内操作继续执行；控制面不会把任意失败自动判定为越界，而是由模型分析结果后显式发起 bypass 调用，再在启动前审批。`.env*`、Agent 控制数据及 `.git` 中的高风险配置保留额外保护。
+
+这套 Windows sandbox 当前只约束 workspace 外写入和普通进程树生命周期，尚不隔离宿主读取与网络。因此项目保留 `ask` 为默认模式，把 `full` 标记为显式危险模式，也不把当前实现宣传为完整恶意代码 containment。这里选择的是可验证的较小承诺，而不是更好听但无法兑现的“精准识别所有危险命令”。
+
+设计参照：[Claude Code permission modes](https://code.claude.com/docs/en/permission-modes)、[Claude Code sandboxing](https://code.claude.com/docs/en/sandboxing)、[OpenAI Codex sandboxing](https://learn.chatgpt.com/docs/sandboxing)、[Codex approvals & security](https://learn.chatgpt.com/docs/agent-approvals-security)、[Codex Windows sandbox](https://learn.chatgpt.com/docs/windows/windows-sandbox)。
 
 ## 核心能力与证据
 
