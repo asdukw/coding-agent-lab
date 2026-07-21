@@ -251,6 +251,7 @@ MCP Server 是外部进程，可能拥有 workspace Sandbox 之外的副作用�
 - Session Index 保存在 `.cagent/sessions/session_index.jsonl`；每个 Session 只保留最新条目，并通过同目录临时文件原子替换。
 - 长期 Memory 保存在 `.cagent/memory/`。Memory Agent 只能写入这里；主 Agent 也可以通过经过路径和格式验证的 `Write` / `Edit` 更新 topic 文件。
 - `.cagent/memory/MEMORY.md` 由系统根据 topic frontmatter 自动维护，不能直接修改。
+- Memory mutation 通过 SQLite 锁在同/跨进程间串行化；`Edit` 将读取、替换、校验、原子写入和索引刷新放在同一事务边界内，并在提交前检测文件身份或内容冲突。
 - Memory Extraction 结果通常写入 Session；若 Session 事件无法持久化，才回退到 `.cagent/audit/memory-extraction/`。
 
 Session、审计和 MCP 配置属于 Agent 控制数据，普通文件工具不能直接访问；`.cagent/memory/` 是唯一受专用验证流程约束的例外。
@@ -272,6 +273,9 @@ bun run demo:deepseek
 
 # 离线单元测试
 bun run test:unit
+
+# Memory 跨进程锁专项测试
+bun run test:memory-lock
 
 # 需要 DEEPSEEK_API_KEY 的连通性测试
 bun run test:deepseek

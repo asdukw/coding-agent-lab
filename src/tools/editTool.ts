@@ -1,10 +1,6 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { z } from "zod";
-import {
-	readMemoryFileForEdit,
-	resolveMemoryWriteTarget,
-	writeValidatedMemoryFile,
-} from "../memory";
+import { editValidatedMemoryFile, resolveMemoryWriteTarget } from "../memory";
 import {
 	fileResourceAccesses,
 	memoryResourceAccess,
@@ -45,10 +41,20 @@ export const editTool: Tool<Input, Output> = {
 	},
 	async call({ file_path, old_string, new_string, replace_all }, context) {
 		const state = context?.getState();
-		const memoryFile = state
-			? await readMemoryFileForEdit(state.cwd, file_path)
+		const memoryTarget = state
+			? await resolveMemoryWriteTarget(state.cwd, file_path)
 			: undefined;
-		const text = memoryFile?.content ?? (await readFile(file_path, "utf-8"));
+		if (state && memoryTarget) {
+			return editValidatedMemoryFile(
+				state.cwd,
+				memoryTarget,
+				old_string,
+				new_string,
+				replace_all,
+			);
+		}
+
+		const text = await readFile(file_path, "utf-8");
 		const occurrences = text.split(old_string).length - 1;
 
 		if (occurrences === 0) {
@@ -64,11 +70,6 @@ export const editTool: Tool<Input, Output> = {
 		const updated = replace_all
 			? text.split(old_string).join(new_string)
 			: text.replace(old_string, new_string);
-		if (state && memoryFile) {
-			await writeValidatedMemoryFile(state.cwd, memoryFile.targetPath, updated);
-			return { replacements };
-		}
-
 		await writeFile(file_path, updated, "utf-8");
 		return { replacements };
 	},

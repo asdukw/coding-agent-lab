@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	buildMemorySelectionMessages,
+	editValidatedMemoryFile,
 	ensureMemoryStore,
 	formatMemoryManifest,
 	formatMemoryStoreSummary,
@@ -12,6 +13,7 @@ import {
 	isMemoryExpired,
 	loadMemoryPrompt,
 	MAX_MEMORY_TOPIC_BYTES,
+	MemoryEditConflictError,
 	parseSelectedMemoryFilenames,
 	readRelevantMemories,
 	refreshMemoryIndex,
@@ -429,6 +431,61 @@ test("concurrent memory writes cannot bypass duplicate validation", async () => 
 		expect(await validateMemoryStore(cwd)).toEqual([]);
 		const index = await readFile(getMemoryIndexPath(cwd), "utf8");
 		expect((index.match(/One shared convention/g) ?? []).length).toBe(1);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("concurrent memory edits serialize the full transaction and report conflicts", async () => {
+	const cwd = await makeTempDir();
+	try {
+		await ensureMemoryStore(cwd);
+		const topicPath = join(cwd, ".cagent", "memory", "shared.md");
+		const original = [
+			"---",
+			"type: project",
+			"description: Original shared convention",
+			"created_at: 2026-07-21T00:00:00.000Z",
+			"updated_at: 2026-07-21T00:00:00.000Z",
+			"source: user",
+			"confidence: high",
+			"stability: evolving",
+			"---",
+			"",
+			"Keep the original convention.",
+		].join("\n");
+		await writeValidatedMemoryFile(cwd, topicPath, original);
+
+		const results = await Promise.allSettled([
+			editValidatedMemoryFile(
+				cwd,
+				topicPath,
+				"Original shared convention",
+				"Updated shared convention",
+			),
+			editValidatedMemoryFile(
+				cwd,
+				topicPath,
+				"Original shared convention",
+				"Updated shared convention",
+			),
+		]);
+
+		expect(results.map((result) => result.status).sort()).toEqual([
+			"fulfilled",
+			"rejected",
+		]);
+		const rejected = results.find(
+			(result): result is PromiseRejectedResult => result.status === "rejected",
+		);
+		expect(rejected?.reason).toBeInstanceOf(MemoryEditConflictError);
+		expect(String(rejected?.reason)).toContain("Memory edit conflict");
+		expect(await readFile(topicPath, "utf8")).toContain(
+			"description: Updated shared convention",
+		);
+		const index = await readFile(getMemoryIndexPath(cwd), "utf8");
+		expect(index).toContain("[Updated shared convention](shared.md)");
+		expect(index).not.toContain("Original shared convention");
 	} finally {
 		await rm(cwd, { recursive: true, force: true });
 	}

@@ -19,6 +19,7 @@
 		"test": "bun run test:unit",
 		"test:unit": "bun --no-env-file scripts/test-unit.ts",
 		"test:deepseek": "bun test tests/deepseekConnectivity.test.ts",
+		"test:memory-lock": "bun --no-env-file test tests/integration/memoryMutationLock.test.ts",
 		"test:sandbox": "bun test tests/integration/windowsSandbox.test.ts",
 		"ci": "bun run check:style && bun run check && bun run test:unit",
 		"lint": "biome check src tests examples package.json tsconfig.json",

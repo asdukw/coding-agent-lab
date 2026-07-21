@@ -1,8 +1,10 @@
 # Memory 写入层后续计划
 
-状态：延后实现。当前版本已完成静态 symlink/junction/hardlink 防护、严格 frontmatter、精确去重、`MEMORY.md` 原子重建、失败审计和同/跨进程写入互斥。
+状态：P0 威胁模型与 P1 Memory Edit 事务语义已完成；跨进程锁专项测试尚未补全，P2 治理能力仍待实现。
 
 ## P0：明确并收紧本地文件系统攻击模型
+
+状态：已完成，见 [`docs/adr/0003-memory-filesystem-threat-model.md`](docs/adr/0003-memory-filesystem-threat-model.md)。当前版本抵御不可信模型路径与静态链接别名，并明确不承诺抵御同一宿主用户恶意进程的强 TOCTOU 竞争。
 
 - 决定是否需要抵御另一个不受控本地进程在每次路径校验后立即 rename/junction 替换目录或已打开临时文件。
 - 若需要，采用原生 `openat`/`O_NOFOLLOW`/目录句柄（Windows 使用不允许 delete-share 的文件句柄）实现，而不是依赖路径字符串的重复校验。
@@ -10,11 +12,15 @@
 
 ## P1：完成 memory Edit 的事务语义
 
+状态：已完成。读取、定位替换、校验、原子写入和索引刷新现处于同一 mutation lock 内；提交前会比较 device、inode、size、mtime 和内容快照，并以 `MemoryEditConflictError` 报告冲突。
+
 - 将“读取旧内容、定位替换、frontmatter/去重校验、原子写入、索引刷新”纳入同一 memory mutation lock。
 - 为 Edit 增加版本或 inode/mtime 冲突检测，避免两个并发编辑以旧内容互相覆盖。
 - 验收：并发 Edit 对同一 topic 时，一个操作成功，另一个得到可追踪的冲突错误；`MEMORY.md` 保持最新。
 
 ## P1：补齐跨进程锁的专项测试
+
+状态：进行中。已增加独立 Bun 进程并发编辑同一 topic 的测试；异常退出释放、锁库损坏 fail-closed、工作目录别名和容量竞争仍待覆盖。
 
 - 用独立 Bun 进程验证 SQLite `BEGIN IMMEDIATE` 互斥、进程异常退出后的自动释放以及锁库损坏时 fail-closed。
 - 覆盖工作目录别名、多个 cagent 进程和容量上限竞争。

@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
-import type { Dirent } from "node:fs";
+import type { BigIntStats, Dirent } from "node:fs";
 import {
 	mkdir,
 	open,
@@ -108,6 +108,22 @@ export type RelevantMemory = {
 	mtimeMs: number;
 	truncated: boolean;
 };
+
+type MemoryEditSnapshot = {
+	targetPath: string;
+	content: string;
+	device: bigint;
+	inode: bigint;
+	size: bigint;
+	mtimeNs: bigint;
+};
+
+export class MemoryEditConflictError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "MemoryEditConflictError";
+	}
+}
 
 export function getMemoryDir(cwd: string): string {
 	return join(cwd, ".cagent", MEMORY_DIR_NAME);
@@ -358,24 +374,117 @@ export async function writeValidatedMemoryFile(
 	});
 }
 
-export async function readMemoryFileForEdit(
+export async function editValidatedMemoryFile(
 	cwd: string,
 	path: string,
-): Promise<{ targetPath: string; content: string } | undefined> {
-	const targetPath = await resolveMemoryWriteTarget(cwd, path);
-	if (!targetPath) {
-		return undefined;
-	}
-	if (isMemoryIndexPath(targetPath)) {
-		throw new Error("MEMORY.md is managed automatically after extraction");
-	}
+	oldString: string,
+	newString: string,
+	replaceAll = false,
+): Promise<{ replacements: number }> {
+	return withMemoryMutationLock(cwd, async () => {
+		const targetPath = await resolveMemoryWriteTarget(cwd, path);
+		if (!targetPath) {
+			throw new Error(`Path is outside the memory directory: ${path}`);
+		}
+		if (isMemoryIndexPath(targetPath)) {
+			throw new Error("MEMORY.md is managed automatically after extraction");
+		}
+
+		const snapshot = await readMemoryEditSnapshot(targetPath);
+		const occurrences = countExactOccurrences(snapshot.content, oldString);
+		if (occurrences === 0) {
+			throw new MemoryEditConflictError(
+				`Memory edit conflict: old_string not found in ${path}; the file may have changed`,
+			);
+		}
+		if (!replaceAll && occurrences > 1) {
+			throw new Error(
+				`old_string matched ${occurrences} times in ${path}; pass replace_all or make old_string unique`,
+			);
+		}
+
+		const replacements = replaceAll ? occurrences : 1;
+		const updated = replaceAll
+			? snapshot.content.split(oldString).join(newString)
+			: snapshot.content.replace(oldString, newString);
+		const issues = await validateMemoryWrite(cwd, targetPath, updated);
+		if (issues.length > 0) {
+			throw new Error(
+				`Invalid memory file: ${issues.map((issue) => issue.message).join("; ")}`,
+			);
+		}
+
+		await assertMemoryEditSnapshotUnchanged(snapshot);
+		await replaceMemoryFileAtomically(cwd, targetPath, updated);
+		await refreshMemoryIndexUnlocked(cwd);
+		return { replacements };
+	});
+}
+
+function countExactOccurrences(content: string, search: string): number {
+	return content.split(search).length - 1;
+}
+
+async function readMemoryEditSnapshot(
+	targetPath: string,
+): Promise<MemoryEditSnapshot> {
+	const before = await stat(targetPath, { bigint: true });
 	const result = await readTextPrefix(targetPath, MAX_MEMORY_TOPIC_BYTES);
+	const after = await stat(targetPath, { bigint: true });
 	if (result.truncated) {
 		throw new Error(
 			`Memory topic files must not exceed ${MAX_MEMORY_TOPIC_BYTES} bytes`,
 		);
 	}
-	return { targetPath, content: result.content };
+	if (!sameMemoryFileVersion(before, after)) {
+		throw new MemoryEditConflictError(
+			`Memory edit conflict: ${targetPath} changed while it was being read`,
+		);
+	}
+	return {
+		targetPath,
+		content: result.content,
+		device: after.dev,
+		inode: after.ino,
+		size: after.size,
+		mtimeNs: after.mtimeNs,
+	};
+}
+
+async function assertMemoryEditSnapshotUnchanged(
+	snapshot: MemoryEditSnapshot,
+): Promise<void> {
+	let current: MemoryEditSnapshot;
+	try {
+		current = await readMemoryEditSnapshot(snapshot.targetPath);
+	} catch (caught) {
+		if (caught instanceof MemoryEditConflictError) {
+			throw caught;
+		}
+		throw new MemoryEditConflictError(
+			`Memory edit conflict: ${snapshot.targetPath} could not be re-read before commit: ${caught instanceof Error ? caught.message : String(caught)}`,
+		);
+	}
+	if (
+		current.device !== snapshot.device ||
+		current.inode !== snapshot.inode ||
+		current.size !== snapshot.size ||
+		current.mtimeNs !== snapshot.mtimeNs ||
+		current.content !== snapshot.content
+	) {
+		throw new MemoryEditConflictError(
+			`Memory edit conflict: ${snapshot.targetPath} changed before commit`,
+		);
+	}
+}
+
+function sameMemoryFileVersion(left: BigIntStats, right: BigIntStats): boolean {
+	return (
+		left.dev === right.dev &&
+		left.ino === right.ino &&
+		left.size === right.size &&
+		left.mtimeNs === right.mtimeNs
+	);
 }
 
 export async function loadMemoryPrompt(cwd: string): Promise<string> {
