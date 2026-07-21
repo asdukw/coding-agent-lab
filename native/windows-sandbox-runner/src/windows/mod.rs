@@ -401,14 +401,28 @@ fn trusted_pwsh_executable_from(
 
     if let Some(search_path) = search_path {
         for directory in std::env::split_paths(search_path) {
-            let candidate = directory.join("pwsh.exe");
+            let path_candidate = directory.join("pwsh.exe");
             // PATH is caller-controlled and routinely contains unavailable or
             // user-owned directories. Reject unrelated layouts without touching
             // the filesystem; only plausible machine installs fail closed on
             // probe errors other than NotFound.
-            if !has_supported_pwsh_layout(&candidate, program_files) {
+            if !has_supported_pwsh_layout(&path_candidate, program_files) {
                 continue;
             }
+            let Some(version_directory) = path_candidate
+                .parent()
+                .and_then(|parent| parent.file_name())
+            else {
+                continue;
+            };
+            // Windows canonicalization may preserve caller-supplied casing. Rebase
+            // the validated suffix onto the canonical trust root so containment
+            // remains case-sensitive for NTFS directories without rejecting a PATH
+            // alias whose Program Files prefix uses different casing.
+            let candidate = program_files
+                .join("PowerShell")
+                .join(version_directory)
+                .join("pwsh.exe");
             if let Some(powershell) = trusted_powershell_candidate(
                 &candidate,
                 program_files,
@@ -1672,6 +1686,35 @@ mod tests {
         );
         assert!(matches!(resolved.summary.engine, PowerShellEngine::Pwsh));
         assert_eq!(resolved.summary.version, "7");
+        assert!(!resolved.summary.fallback);
+    }
+
+    #[test]
+    fn program_files_path_case_alias_is_rebased_to_the_trusted_root() {
+        let temporary = TestDirectory::create();
+        let program_files = temporary.path.join("Program Files");
+        let install_directory = program_files.join("PowerShell").join("7-preview");
+        create_test_executable(&install_directory.join("pwsh.exe"));
+        let program_files = canonical_test_directory(&program_files);
+        let system_directory = create_test_system_directory(&temporary);
+        create_test_executable(
+            &system_directory
+                .join("WindowsPowerShell")
+                .join("v1.0")
+                .join("powershell.exe"),
+        );
+        let path_alias = PathBuf::from(install_directory.to_string_lossy().to_uppercase());
+        let search_path = std::env::join_paths([path_alias]).expect("construct test search path");
+
+        let resolved = trusted_powershell_executable_from(
+            &program_files,
+            Some(search_path.as_os_str()),
+            &system_directory,
+        )
+        .expect("trusted PATH casing alias should be found");
+
+        assert!(path_is_within(&resolved.executable, &program_files));
+        assert!(matches!(resolved.summary.engine, PowerShellEngine::Pwsh));
         assert!(!resolved.summary.fallback);
     }
 
