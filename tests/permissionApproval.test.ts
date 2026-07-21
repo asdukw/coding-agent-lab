@@ -298,9 +298,18 @@ test("approval presets map to bounded automation or explicit full access", async
 				kind: "allow",
 			},
 		);
+		expect(await getToolPermissionDecision(auto, shellTool, shellArgs)).toEqual(
+			{ kind: "allow" },
+		);
 		expect(
-			await getToolPermissionDecision(auto, shellTool, shellArgs),
-		).toMatchObject({ kind: "ask" });
+			await getToolPermissionDecision(auto, shellTool, {
+				...shellArgs,
+				dangerously_disable_sandbox: true,
+			}),
+		).toMatchObject({
+			kind: "ask",
+			reason: expect.stringContaining("outside the workspace sandbox"),
+		});
 		expect(await getToolPermissionDecision(auto, mcpTool, {})).toMatchObject({
 			kind: "ask",
 		});
@@ -333,6 +342,26 @@ test("approval presets map to bounded automation or explicit full access", async
 			rm(outside, { recursive: true, force: true }),
 		]);
 	}
+});
+
+test("a session Shell grant never silently authorizes a sandbox bypass", async () => {
+	const state = setApprovalMode(
+		createInitialState("keep the sandbox boundary", process.cwd()),
+		"auto",
+	);
+	state.toolPermissionContext.sessionAllowedTools = ["Shell"];
+
+	expect(
+		await getToolPermissionDecision(state, shellTool, {
+			command: "Write-Output sandboxed",
+		}),
+	).toEqual({ kind: "allow" });
+	expect(
+		await getToolPermissionDecision(state, shellTool, {
+			command: "Write-Output elevated",
+			dangerously_disable_sandbox: true,
+		}),
+	).toMatchObject({ kind: "ask" });
 });
 
 test("permission presets keep approval and sandbox policy as separate axes", () => {

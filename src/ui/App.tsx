@@ -63,7 +63,7 @@ const PERMISSION_OPTIONS: Array<{
 		mode: "auto",
 		label: "Approve for me",
 		description:
-			"Automatically allow bounded workspace edits; ask for Shell and MCP calls",
+			"Automatically allow sandboxed workspace operations; ask before sandbox bypass or MCP calls",
 	},
 	{
 		mode: "full_access",

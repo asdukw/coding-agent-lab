@@ -93,7 +93,7 @@ C:\path\to\CodingAgentLab\cagent.exe "分析当前仓库"
 
 ### 权限与持久化
 
-- `/permissions` 将审批策略与沙箱策略组合成三档预设：`ask` 对文件修改、Shell 与 MCP 逐次询问；`auto` 自动批准 workspace 内的文件修改，但在网络尚未隔离的 Windows Shell 和外部 MCP 前仍询问；`full` 同时关闭交互审批与文件系统沙箱。
+- `/permissions` 将审批策略与沙箱策略组合成三档预设：`ask` 对文件修改、Shell 与 MCP 逐次询问；`auto` 对 workspace 边界内的文件操作和 sandboxed Shell 默认放行，只有 Shell 显式请求 `dangerously_disable_sandbox` 越界执行或调用外部 MCP 时才询问；`full` 同时关闭交互审批与文件系统沙箱。
 - `ask` 与 `auto` 保留 workspace、`.env*` / `.git`、Sub-agent 和 Windows Sandbox 边界；`full` 使用宿主用户的文件、环境变量和网络权限，属于显式危险模式。默认模式为 `ask`。
 - 切换权限模式会先取消并等待当前 Session 的活跃 Sub-agent 全部停止，再使新策略生效；旧模式下的 Session 工具授权不会跨模式保留。
 - 危险工具整批暂停，支持单次允许、进程会话允许和拒绝。

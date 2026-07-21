@@ -80,7 +80,7 @@ export async function getToolPermissionDecision(
 		return { kind: "deny", reason: formatCaught(caught) };
 	}
 
-	if (!requiresInteractiveApproval(state, tool)) {
+	if (!requiresInteractiveApproval(state, tool, args)) {
 		return { kind: "allow" };
 	}
 
@@ -91,7 +91,7 @@ export async function getToolPermissionDecision(
 	if (approval === "deny") {
 		return { kind: "deny", reason: `User denied ${tool.name}` };
 	}
-	return { kind: "ask", reason: approvalReason(tool) };
+	return { kind: "ask", reason: approvalReason(tool, args) };
 }
 
 export async function authorizeToolCall(
@@ -348,7 +348,11 @@ async function authorizeWriteToolCall(
 	}
 }
 
-function requiresInteractiveApproval(state: AgentState, tool: Tool): boolean {
+function requiresInteractiveApproval(
+	state: AgentState,
+	tool: Tool,
+	args: Record<string, unknown>,
+): boolean {
 	if (
 		state.toolPermissionContext.mode !== "normal" ||
 		state.toolPermissionContext.agentType !== "main"
@@ -362,9 +366,10 @@ function requiresInteractiveApproval(state: AgentState, tool: Tool): boolean {
 		return false;
 	}
 	if (policy.approval === "ask_on_risk") {
-		// The current native sandbox does not isolate network access, so Shell and
-		// opaque MCP calls remain escalation points until that boundary exists.
-		return tool.name === SHELL_TOOL_NAME || isMcpTool(tool);
+		// Auto mode follows a sandbox-first flow: bounded Shell calls run without a
+		// prompt, while an explicit sandbox bypass and opaque external side effects
+		// remain escalation points.
+		return isSandboxBypass(tool.name, args) || isMcpTool(tool);
 	}
 	return (
 		GENERIC_WRITE_TOOL_NAMES.has(tool.name) ||
@@ -417,20 +422,35 @@ function approvalForCall(
 		}
 		return undefined;
 	}
-	if (state.toolPermissionContext.sessionAllowedTools.includes(toolName)) {
+	if (
+		state.toolPermissionContext.sessionAllowedTools.includes(toolName) &&
+		!isSandboxBypass(toolName, args)
+	) {
 		return "allow";
 	}
 	return undefined;
 }
 
-function approvalReason(tool: Tool): string {
+function approvalReason(tool: Tool, args: Record<string, unknown>): string {
 	if (tool.name === SHELL_TOOL_NAME) {
+		if (isSandboxBypass(tool.name, args)) {
+			return "requests execution outside the workspace sandbox with the host user's filesystem, environment, and network authority";
+		}
 		return "executes a PowerShell command that can read host-user files, write in the workspace, and use inherited network access";
 	}
 	if (isMcpTool(tool)) {
 		return "calls an external MCP tool whose side effects are not controlled by the workspace sandbox";
 	}
 	return `${tool.name} modifies files in the workspace`;
+}
+
+function isSandboxBypass(
+	toolName: string,
+	args: Record<string, unknown>,
+): boolean {
+	return (
+		toolName === SHELL_TOOL_NAME && args.dangerously_disable_sandbox === true
+	);
 }
 
 function isPrivilegedMainToolAllowed(state: AgentState): boolean {

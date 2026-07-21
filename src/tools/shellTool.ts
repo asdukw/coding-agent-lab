@@ -33,6 +33,12 @@ const shellInputSchema = z.object({
 		.max(600_000)
 		.optional()
 		.describe("Command timeout in milliseconds; defaults to 120000"),
+	dangerously_disable_sandbox: z
+		.boolean()
+		.optional()
+		.describe(
+			"Request execution with host-user authority after a sandboxed attempt failed because it crossed the sandbox boundary. This bypass requires user approval unless full access is already active.",
+		),
 });
 
 type ShellInput = z.infer<typeof shellInputSchema>;
@@ -57,7 +63,7 @@ export type ShellOutput = {
 export const shellTool: Tool<ShellInput, ShellOutput> = {
 	name: SHELL_TOOL_NAME,
 	description:
-		"Execute one non-interactive PowerShell command. PowerShell 7 (pwsh) is preferred, with an explicit fallback to Windows PowerShell 5.1 when unavailable. Selection happens before launch; a started command is never retried under another shell. Use Windows PowerShell 5.1-compatible syntax for the first command; every command result exposes the selected shell engine and compatibility version for subsequent commands. The active permission mode selects either workspace-restricted filesystem access or explicit host-user filesystem/environment/network authority. In both modes, members assigned to the Windows Job are terminated on timeout or cancellation; brokered processes outside that Job are not covered.",
+		"Execute one non-interactive PowerShell command. PowerShell 7 (pwsh) is preferred, with an explicit fallback to Windows PowerShell 5.1 when unavailable. Selection happens before launch; a started command is never retried under another shell. Use Windows PowerShell 5.1-compatible syntax for the first command; every command result exposes the selected shell engine and compatibility version for subsequent commands. Auto mode runs commands inside the workspace sandbox without approval. Only set dangerously_disable_sandbox after a sandboxed attempt failed because it crossed the boundary; the retry uses host-user authority and requires user approval. Full access always uses host-user authority. In both modes, members assigned to the Windows Job are terminated on timeout or cancellation; brokered processes outside that Job are not covered.",
 	inputSchema: shellInputSchema,
 	async getResourceAccesses(_input, context) {
 		const state = requireContext(context).getState();
@@ -93,10 +99,11 @@ export const shellTool: Tool<ShellInput, ShellOutput> = {
 		};
 		return [...workspaceAccesses, sandboxAccess, opaqueToolAccess()];
 	},
-	async call({ command, timeout_ms }, context) {
+	async call({ command, timeout_ms, dangerously_disable_sandbox }, context) {
 		const toolContext = requireContext(context);
 		const state = toolContext.getState();
-		const dangerFullAccess = hasDangerFullAccess(state);
+		const dangerFullAccess =
+			hasDangerFullAccess(state) || dangerously_disable_sandbox === true;
 		const sandbox = await getWindowsSandbox(state.cwd);
 		const result = await sandbox.runPowerShell({
 			command,

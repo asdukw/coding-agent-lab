@@ -241,7 +241,7 @@ test("permissions command opens the picker and supports direct mode changes", as
 		stdin.write("2");
 		await waitForFrame(lastFrame, "permissions: auto");
 		expect(lastFrame()).toContain(
-			"Automatically allow bounded workspace edits",
+			"Automatically allow sandboxed workspace operations",
 		);
 
 		await waitForInputReady(lastFrame, "Type a message and press Enter...");

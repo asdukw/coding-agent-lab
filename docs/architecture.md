@@ -38,6 +38,10 @@ Coding Agent Lab 通过独立实现控制面，研究不可信模型输出如何
 
 计划审批与工具审批是两层独立状态：计划获批只允许进入执行阶段，不会自动授权危险工具。单次授权只覆盖当前批次；进程级授权不会写入 Session，恢复后待执行调用仍需重新校验。该取舍见 [ADR 0001](adr/0001-explicit-agent-control-state-machine.md)。
 
+`auto` 使用 sandbox-first 权限流：普通 Shell 调用先在 `workspace_write` 边界内执行，不产生工具审批；如果模型根据失败结果判断命令确实需要边界外权限，必须以 `dangerously_disable_sandbox: true` 发起新的 Shell 调用，该调用在启动前进入正常审批流。审批不会触发控制面自动重放，避免已经在 sandbox 内产生部分副作用的命令被隐式执行第二次；即使用户曾对 Shell 选择“本会话不再询问”，显式 sandbox bypass 仍必须重新审批。外部 MCP 副作用不受本地 sandbox 约束，因此继续在执行前审批。
+
+当前 Win32 runner 的 `workspace_write` 只强制工作区写边界和进程树生命周期，宿主读取与网络仍未隔离；UI、工具结果与文档必须持续披露这一限制。`auto` 的这一阶段首先对齐“sandbox 内默认允许、显式越界再审批”的控制流，不能宣称已经达到同时隔离文件读取与网络的完整恶意代码 containment。
+
 ## 状态、并发与恢复
 
 - Session 使用 JSONL 事件表达对话、工具调用、状态快照和 Memory Extraction 结果。
