@@ -1,6 +1,6 @@
-import { Box, Text, useInput } from "ink";
+import { Box, Static, Text, useInput, useWindowSize } from "ink";
 import TextInput from "ink-text-input";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { InProcessAgentManager } from "../agents/manager";
 import { ensureMemoryStore, formatMemoryStoreSummary } from "../memory";
 import { runMemoryExtractionSubAgent } from "../memoryExtract";
@@ -30,6 +30,7 @@ import {
 import { BUILTIN_TOOLS } from "../tools";
 import { type Tools, toToolSpecs } from "../tools/types";
 import { type AppLifecycle, createAppLifecycle } from "./appLifecycle";
+import { Composer } from "./Composer";
 import { parseLocalCommand } from "./localCommands";
 import { Markdown } from "./Markdown";
 import { SelectionMenu, type SelectionMenuOption } from "./SelectionMenu";
@@ -45,6 +46,8 @@ export type AppProps = {
 };
 
 const EMPTY_TOOLS: Tools = [];
+const STREAM_RENDER_INTERVAL_MS = 32;
+const QUEUE_PREVIEW_LIMIT = 2;
 
 const PERMISSION_OPTIONS: Array<{
 	mode: ApprovalMode;
@@ -147,6 +150,11 @@ type RunSource =
 	| { kind: "user"; content: string }
 	| { kind: "approval"; content: string }
 	| { kind: "background" };
+
+type QueuedInput = {
+	id: number;
+	content: string;
+};
 
 function timelineFromState(state: AgentState | undefined): TimelineEntry[] {
 	if (!state) {
@@ -268,7 +276,36 @@ function appendMessageToTimeline(
 	];
 }
 
-function TimelineRow({ entry }: { entry: TimelineEntry }) {
+function appendResumedTimeline(
+	current: TimelineEntry[],
+	restored: AgentState,
+): TimelineEntry[] {
+	// Ink Static is append-only, just like terminal scrollback. Keep the prior
+	// transcript visible and append a uniquely keyed snapshot of the resumed one.
+	const prefix = `${restored.sessionId}:resume:${current.length}`;
+	const restoredEntries = timelineFromState(restored).map(
+		(entry, index): TimelineEntry => ({
+			...entry,
+			id: `${prefix}:${index}:${entry.id}`,
+		}),
+	);
+	return [
+		...current,
+		{
+			id: `${prefix}:separator`,
+			kind: "local",
+			command: "/resume",
+			content: `Resumed session ${restored.sessionId}.`,
+		},
+		...restoredEntries,
+	];
+}
+
+const TimelineRow = memo(function TimelineRow({
+	entry,
+}: {
+	entry: TimelineEntry;
+}) {
 	if (entry.kind === "message") {
 		const color =
 			entry.role === "user"
@@ -344,7 +381,52 @@ function TimelineRow({ entry }: { entry: TimelineEntry }) {
 			<Markdown>{entry.content}</Markdown>
 		</Box>
 	);
-}
+});
+
+const QueuedInputs = memo(function QueuedInputs({
+	items,
+}: {
+	items: QueuedInput[];
+}) {
+	if (items.length === 0) {
+		return null;
+	}
+	const hiddenCount = Math.max(0, items.length - QUEUE_PREVIEW_LIMIT);
+	const visibleItems = items.slice(-QUEUE_PREVIEW_LIMIT);
+	return (
+		<Box flexDirection="column">
+			<Text color="yellow">
+				queued: {items.length} message{items.length === 1 ? "" : "s"}
+				{hiddenCount > 0 ? ` (${hiddenCount} earlier hidden)` : ""}
+			</Text>
+			{visibleItems.map((item) => (
+				<Text color="gray" key={item.id} wrap="truncate-end">
+					› {formatQueuePreview(item.content)}
+				</Text>
+			))}
+		</Box>
+	);
+});
+
+const StreamingMessage = memo(function StreamingMessage({
+	queuedCount,
+	text,
+}: {
+	queuedCount: number;
+	text: string;
+}) {
+	const { columns, rows } = useWindowSize();
+	const visibleText = useMemo(
+		() => formatLiveTail(text, columns, rows, queuedCount > 0),
+		[text, columns, rows, queuedCount],
+	);
+	return (
+		<Box flexDirection="column">
+			<Text color="blue">assistant</Text>
+			<Text>{visibleText || "..."}</Text>
+		</Box>
+	);
+});
 
 export function App({
 	task,
@@ -376,7 +458,8 @@ export function App({
 	const [streamingText, setStreamingText] = useState("");
 	const [status, setStatus] = useState<"idle" | "running">("idle");
 	const runInFlightRef = useRef(false);
-	const [input, setInput] = useState("");
+	const nextQueuedInputIdRef = useRef(1);
+	const [queuedInputs, setQueuedInputs] = useState<QueuedInput[]>([]);
 	const [error, setError] = useState<string | undefined>();
 	const [agentInboxRevision, setAgentInboxRevision] = useState(0);
 	const [approvalMode, setApprovalMode] = useState<ApprovalMode>("ask");
@@ -461,13 +544,13 @@ export function App({
 			initialState: AgentState,
 			persistFromMessageIndex: number,
 			source: RunSource,
-		) => {
+		): boolean => {
 			if (
 				runInFlightRef.current ||
 				permissionChangeInFlightRef.current ||
 				appLifecycle.isClosing
 			) {
-				return;
+				return false;
 			}
 
 			runInFlightRef.current = true;
@@ -492,7 +575,25 @@ export function App({
 			}
 
 			let assistantText = "";
+			let streamRenderTimer: ReturnType<typeof setTimeout> | undefined;
 			let latestState = initialState;
+			const cancelStreamRender = () => {
+				if (streamRenderTimer !== undefined) {
+					clearTimeout(streamRenderTimer);
+					streamRenderTimer = undefined;
+				}
+			};
+			const scheduleStreamRender = () => {
+				if (streamRenderTimer !== undefined) {
+					return;
+				}
+				streamRenderTimer = setTimeout(() => {
+					streamRenderTimer = undefined;
+					if (!appLifecycle.isClosing) {
+						setStreamingText(assistantText);
+					}
+				}, STREAM_RENDER_INTERVAL_MS);
+			};
 
 			const runPromise = (async () => {
 				try {
@@ -519,7 +620,7 @@ export function App({
 						} else if (event.type === "stream_delta") {
 							assistantText += event.content;
 							if (!appLifecycle.isClosing) {
-								setStreamingText(assistantText);
+								scheduleStreamRender();
 							}
 						} else if (event.type === "message") {
 							await appendSessionMessage(cwd, initialState, event.message);
@@ -532,6 +633,7 @@ export function App({
 									),
 								);
 								if (event.message.role === "assistant") {
+									cancelStreamRender();
 									assistantText = "";
 									setStreamingText("");
 								}
@@ -580,18 +682,21 @@ export function App({
 								await appendSessionState(cwd, event.terminal.state);
 							}
 							if (!appLifecycle.isClosing) {
+								cancelStreamRender();
 								setAgentState(event.terminal.state);
 								setStreamingText("");
 							}
 						}
 					}
 				} catch (caught) {
+					cancelStreamRender();
 					if (!appLifecycle.isClosing) {
 						setAgentState(latestState);
 						setError(caught instanceof Error ? caught.message : String(caught));
 						setStreamingText("");
 					}
 				} finally {
+					cancelStreamRender();
 					runInFlightRef.current = false;
 					if (!appLifecycle.isClosing) {
 						setStatus("idle");
@@ -599,22 +704,23 @@ export function App({
 				}
 			})();
 			appLifecycle.track(runPromise);
+			return true;
 		},
 		[appLifecycle, agentRuntime, cwd, enableMemoryExtraction, model, tools],
 	);
 
 	const runTurn = useCallback(
-		(text: string) => {
+		(text: string): boolean => {
 			const trimmed = text.trim();
-			if (!trimmed || status === "running" || appLifecycle.isClosing) {
-				return;
+			if (!trimmed || runInFlightRef.current || appLifecycle.isClosing) {
+				return false;
 			}
 			if (
 				agentState?.toolPermissionContext.pendingToolApproval ||
 				agentState?.toolPermissionContext.pendingPlanApproval
 			) {
 				setError("Resolve the pending approval before starting a new turn.");
-				return;
+				return false;
 			}
 
 			const baseState = agentState
@@ -622,12 +728,12 @@ export function App({
 				: createInitialState(trimmed, cwd, toToolSpecs(tools));
 			const initialState = setStateApprovalMode(baseState, approvalMode);
 
-			runState(initialState, agentState?.messages.length ?? 0, {
+			return runState(initialState, agentState?.messages.length ?? 0, {
 				kind: "user",
 				content: trimmed,
 			});
 		},
-		[agentState, appLifecycle, approvalMode, cwd, runState, status, tools],
+		[agentState, appLifecycle, approvalMode, cwd, runState, tools],
 	);
 
 	// biome-ignore lint/correctness/useExhaustiveDependencies: intentionally runs once on mount, not on every task/runTurn change
@@ -636,6 +742,30 @@ export function App({
 			runTurn(task);
 		}
 	}, []);
+
+	useEffect(() => {
+		const next = queuedInputs[0];
+		if (
+			!next ||
+			status !== "idle" ||
+			runInFlightRef.current ||
+			permissionChangeInFlight ||
+			pendingPlanApproval ||
+			pendingToolApproval
+		) {
+			return;
+		}
+		if (runTurn(next.content)) {
+			setQueuedInputs((current) => current.slice(1));
+		}
+	}, [
+		pendingPlanApproval,
+		pendingToolApproval,
+		permissionChangeInFlight,
+		queuedInputs,
+		runTurn,
+		status,
+	]);
 
 	useEffect(
 		() =>
@@ -669,6 +799,7 @@ export function App({
 		if (
 			status !== "idle" ||
 			permissionChangeInFlight ||
+			queuedInputs.length > 0 ||
 			!agentState ||
 			agentState.toolPermissionContext.pendingPlanApproval ||
 			agentState.toolPermissionContext.pendingToolApproval ||
@@ -684,6 +815,7 @@ export function App({
 		agentRuntime,
 		agentState,
 		permissionChangeInFlight,
+		queuedInputs.length,
 		runState,
 		status,
 	]);
@@ -801,147 +933,182 @@ export function App({
 		},
 	);
 
-	const handleSubmit = (value: string) => {
-		if (appLifecycle.isClosing) {
-			return;
-		}
-		setInput("");
-		if (pendingToolApproval || pendingPlanApproval) {
-			setError("Resolve the pending approval with the selection menu.");
-			return;
-		}
-
-		const localCommand = parseLocalCommand(value);
-		if (localCommand) {
-			if (localCommand.type === "invalid") {
-				setError(localCommand.message);
+	const handleSubmit = useCallback(
+		(value: string) => {
+			if (appLifecycle.isClosing) {
 				return;
 			}
-
-			if (localCommand.type === "unknown") {
-				setError(`unknown command: ${localCommand.name}`);
+			const trimmed = value.trim();
+			if (!trimmed) {
 				return;
 			}
-
-			if (localCommand.type === "resume") {
-				setError(undefined);
-				setStreamingText("");
-				const resumeTask = (async () => {
-					try {
-						const restored = await loadSession(cwd, localCommand.sessionId);
-						if (!appLifecycle.isClosing) {
-							setApprovalMode("ask");
-							setAgentState(restored);
-							setHistory(timelineFromState(restored));
-						}
-					} catch (caught) {
-						if (!appLifecycle.isClosing) {
-							setError(
-								caught instanceof Error ? caught.message : String(caught),
-							);
-						}
-					}
-				})();
-				appLifecycle.track(resumeTask);
-				return;
-			}
-
-			if (localCommand.type === "open_permissions") {
-				const currentIndex = PERMISSION_OPTIONS.findIndex(
-					(option) => option.mode === approvalMode,
-				);
-				setPermissionSelection(Math.max(0, currentIndex));
-				setPermissionsOpen(true);
-				setError(undefined);
-				return;
-			}
-
-			if (localCommand.type === "set_permissions") {
-				applyApprovalMode(localCommand.mode);
-				return;
-			}
-
-			if (localCommand.type === "memory") {
-				setError(undefined);
-				setStreamingText("");
-				const memoryTask = (async () => {
-					try {
-						const info = await ensureMemoryStore(cwd);
-						if (!appLifecycle.isClosing) {
-							setHistory((current) => [
-								...current,
-								{
-									id: `local-${current.length + 1}`,
-									kind: "local",
-									command: "/memory",
-									content: formatMemoryStoreSummary(info),
-								},
-							]);
-						}
-					} catch (caught) {
-						if (!appLifecycle.isClosing) {
-							setError(
-								caught instanceof Error ? caught.message : String(caught),
-							);
-						}
-					}
-				})();
-				appLifecycle.track(memoryTask);
-				return;
-			}
-
-			if (localCommand.type === "enter_plan_mode") {
-				const nextState = setStateApprovalMode(
-					enterPlanMode(
-						agentState ?? createInitialState("/plan", cwd, toToolSpecs(tools)),
-					),
-					approvalMode,
-				);
-				setAgentState(nextState);
-				setHistory((current) => [
+			if (runInFlightRef.current) {
+				if (parseLocalCommand(trimmed)) {
+					setError("Local commands cannot be queued while cagent is running.");
+					return;
+				}
+				setQueuedInputs((current) => [
 					...current,
-					{
-						id: `local-${current.length + 1}`,
-						kind: "local",
-						command: "/plan",
-						content:
-							"Entered plan mode.\n\nThe plan is stored as runtime state only.",
-					},
+					{ id: nextQueuedInputIdRef.current++, content: trimmed },
 				]);
 				setError(undefined);
+				return;
 			}
-			return;
-		}
+			if (pendingToolApproval || pendingPlanApproval) {
+				setError("Resolve the pending approval with the selection menu.");
+				return;
+			}
 
-		runTurn(value);
-	};
+			const localCommand = parseLocalCommand(trimmed);
+			if (localCommand) {
+				if (localCommand.type === "invalid") {
+					setError(localCommand.message);
+					return;
+				}
+
+				if (localCommand.type === "unknown") {
+					setError(`unknown command: ${localCommand.name}`);
+					return;
+				}
+
+				if (localCommand.type === "resume") {
+					setError(undefined);
+					setStreamingText("");
+					const resumeTask = (async () => {
+						try {
+							const restored = await loadSession(cwd, localCommand.sessionId);
+							if (!appLifecycle.isClosing) {
+								setApprovalMode("ask");
+								setAgentState(restored);
+								setHistory((current) =>
+									appendResumedTimeline(current, restored),
+								);
+							}
+						} catch (caught) {
+							if (!appLifecycle.isClosing) {
+								setError(
+									caught instanceof Error ? caught.message : String(caught),
+								);
+							}
+						}
+					})();
+					appLifecycle.track(resumeTask);
+					return;
+				}
+
+				if (localCommand.type === "open_permissions") {
+					const currentIndex = PERMISSION_OPTIONS.findIndex(
+						(option) => option.mode === approvalMode,
+					);
+					setPermissionSelection(Math.max(0, currentIndex));
+					setPermissionsOpen(true);
+					setError(undefined);
+					return;
+				}
+
+				if (localCommand.type === "set_permissions") {
+					applyApprovalMode(localCommand.mode);
+					return;
+				}
+
+				if (localCommand.type === "memory") {
+					setError(undefined);
+					setStreamingText("");
+					const memoryTask = (async () => {
+						try {
+							const info = await ensureMemoryStore(cwd);
+							if (!appLifecycle.isClosing) {
+								setHistory((current) => [
+									...current,
+									{
+										id: `local-${current.length + 1}`,
+										kind: "local",
+										command: "/memory",
+										content: formatMemoryStoreSummary(info),
+									},
+								]);
+							}
+						} catch (caught) {
+							if (!appLifecycle.isClosing) {
+								setError(
+									caught instanceof Error ? caught.message : String(caught),
+								);
+							}
+						}
+					})();
+					appLifecycle.track(memoryTask);
+					return;
+				}
+
+				if (localCommand.type === "enter_plan_mode") {
+					const nextState = setStateApprovalMode(
+						enterPlanMode(
+							agentState ??
+								createInitialState("/plan", cwd, toToolSpecs(tools)),
+						),
+						approvalMode,
+					);
+					setAgentState(nextState);
+					setHistory((current) => [
+						...current,
+						{
+							id: `local-${current.length + 1}`,
+							kind: "local",
+							command: "/plan",
+							content:
+								"Entered plan mode.\n\nThe plan is stored as runtime state only.",
+						},
+					]);
+					setError(undefined);
+				}
+				return;
+			}
+
+			runTurn(trimmed);
+		},
+		[
+			agentState,
+			appLifecycle,
+			applyApprovalMode,
+			approvalMode,
+			cwd,
+			pendingPlanApproval,
+			pendingToolApproval,
+			runTurn,
+			tools,
+		],
+	);
 
 	return (
 		<Box flexDirection="column" gap={1}>
 			<Box flexDirection="column">
-				<Text color="cyan">cagent</Text>
-				<Text color="gray">cwd: {cwd}</Text>
-				<Text color="gray">permissions: {approvalMode}</Text>
-				{agentState ? (
-					<Text color="gray">session: {agentState.sessionId}</Text>
-				) : null}
-				{modelName ? <Text color="gray">model: {modelName}</Text> : null}
+				<Text color="cyan">
+					cagent <Text color="gray">· {status}</Text>
+				</Text>
+				<Text color="gray" wrap="truncate-end">
+					permissions: {approvalMode}
+					{agentState ? ` · session: ${agentState.sessionId}` : ""}
+					{modelName ? ` · model: ${modelName}` : ""}
+					{` · cwd: ${cwd}`}
+				</Text>
 			</Box>
 
-			{history.map((entry) => (
-				<TimelineRow entry={entry} key={entry.id} />
-			))}
+			<Static items={history}>
+				{(entry) => (
+					<Box flexDirection="column" key={entry.id} marginBottom={1}>
+						<TimelineRow entry={entry} />
+					</Box>
+				)}
+			</Static>
 
 			{status === "running" ? (
-				<Box flexDirection="column">
-					<Text color="blue">assistant</Text>
-					{streamingText ? (
-						<Markdown>{streamingText}</Markdown>
-					) : (
-						<Text>...</Text>
-					)}
-				</Box>
+				<StreamingMessage
+					queuedCount={queuedInputs.length}
+					text={streamingText}
+				/>
 			) : null}
+
+			<QueuedInputs items={queuedInputs} />
 
 			{error ? <Text color="red">error: {error}</Text> : null}
 
@@ -1058,23 +1225,67 @@ export function App({
 						selectedIndex={permissionSelection}
 					/>
 				</Box>
-			) : status === "idle" &&
-				!permissionChangeInFlight &&
-				!pendingToolApproval &&
-				!pendingPlanApproval ? (
-				<Box borderStyle="round" borderColor="cyan" paddingX={1}>
-					<Text color="green">{"> "}</Text>
-					<TextInput
-						focus
-						value={input}
-						onChange={setInput}
-						onSubmit={handleSubmit}
-						placeholder="Type a message and press Enter..."
-					/>
-				</Box>
 			) : null}
+
+			<Composer
+				isActive={
+					!permissionChangeInFlight &&
+					!permissionsOpen &&
+					!pendingToolApproval &&
+					!pendingPlanApproval
+				}
+				isRunning={status === "running"}
+				isVisible={
+					!permissionChangeInFlight &&
+					!permissionsOpen &&
+					!pendingToolApproval &&
+					!pendingPlanApproval
+				}
+				onSubmit={handleSubmit}
+			/>
 		</Box>
 	);
+}
+
+function formatQueuePreview(text: string): string {
+	return text.replace(/\s+/g, " ").trim();
+}
+
+function formatLiveTail(
+	text: string,
+	columns: number,
+	rows: number,
+	hasQueuedInput: boolean,
+): string {
+	if (!text) {
+		return "";
+	}
+	const reservedRows = hasQueuedInput ? 16 : 12;
+	const visibleRows = Math.max(2, Math.min(12, rows - reservedRows));
+	const visibleColumns = Math.max(20, columns - 4);
+	// Budget for double-width CJK/emoji so the live region stays below a full
+	// Windows terminal frame even when most characters occupy two cells.
+	const maxCharacters = Math.max(
+		20,
+		Math.floor((visibleRows * visibleColumns) / 2),
+	);
+	let tail = text;
+	let truncated = false;
+	if (tail.length > maxCharacters) {
+		let start = tail.length - maxCharacters;
+		const firstCodeUnit = tail.charCodeAt(start);
+		if (firstCodeUnit >= 0xdc00 && firstCodeUnit <= 0xdfff) {
+			start++;
+		}
+		tail = tail.slice(start);
+		truncated = true;
+	}
+	const lines = tail.split("\n");
+	if (lines.length > visibleRows) {
+		tail = lines.slice(-visibleRows).join("\n");
+		truncated = true;
+	}
+	return truncated ? `…\n${tail}` : tail;
 }
 
 function formatCaught(caught: unknown): string {

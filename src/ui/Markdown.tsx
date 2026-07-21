@@ -1,5 +1,6 @@
 import { Box, Text } from "ink";
 import type { ReactNode } from "react";
+import { memo, useMemo } from "react";
 
 type InlinePart =
 	| { type: "text"; text: string }
@@ -22,8 +23,8 @@ type MarkdownProps = {
 	children: string;
 };
 
-export function Markdown({ children }: MarkdownProps) {
-	const blocks = parseBlocks(children);
+export const Markdown = memo(function Markdown({ children }: MarkdownProps) {
+	const blocks = useMemo(() => parseBlocks(children), [children]);
 
 	return (
 		<Box flexDirection="column">
@@ -32,7 +33,7 @@ export function Markdown({ children }: MarkdownProps) {
 			))}
 		</Box>
 	);
-}
+});
 
 function MarkdownBlock({ block }: { block: Block }) {
 	switch (block.type) {

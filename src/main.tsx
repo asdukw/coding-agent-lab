@@ -109,6 +109,10 @@ export async function runCli(args = process.argv.slice(2)): Promise<void> {
 				mcpTools={mcp.tools}
 				lifecycle={lifecycle}
 			/>,
+			{
+				incrementalRendering: Boolean(process.stdout.isTTY),
+				maxFps: 60,
+			},
 		);
 		await app.waitUntilExit();
 	} finally {
