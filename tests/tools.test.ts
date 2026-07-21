@@ -53,6 +53,11 @@ test("tool failures distinguish backend and command failures", async () => {
 		timed_out: false,
 		stdout_truncated: false,
 		stderr_truncated: false,
+		shell: {
+			engine: "pwsh",
+			version: "7",
+			fallback: false,
+		},
 		enforcement: {
 			filesystem: "write_restricted_acl",
 			process_tree: "job_members_kill_on_close",

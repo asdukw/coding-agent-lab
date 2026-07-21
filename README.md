@@ -177,7 +177,7 @@ $env:DEEPSEEK_MODEL = "deepseek-v4-flash"
 
 ### 3. Windows：构建原生 Sandbox runner
 
-Windows 是当前的主要开发平台。运行内置 `Shell` 需要通过 MSI 或 ZIP 安装在 `Program Files` 的 PowerShell 7；Microsoft Store 的 WindowsApps 版本无法在 Restricted Token 下直接启动，因而会被拒绝。源码构建 runner 还需要 Rustup 与 Visual Studio 2022 C++ Build Tools，并安装固定 Rust 工具链：
+Windows 是当前的主要开发平台。运行内置 `Shell` 时，runner 会先选择 `Program Files\PowerShell\7\pwsh.exe`，再尝试 PATH 中规范化后位于 `Program Files\PowerShell\7` 或 `7-*` 目录的可信 `pwsh.exe`；若都不可用，则回退到 Windows 系统目录中的 Windows PowerShell 5.1。Microsoft Store 的 WindowsApps alias 不会被当作 PowerShell 7 候选。源码构建 runner 还需要 Rustup 与 Visual Studio 2022 C++ Build Tools，并安装固定 Rust 工具链：
 
 ```powershell
 rustup toolchain install 1.96.0-x86_64-pc-windows-msvc --profile minimal
@@ -195,9 +195,11 @@ bun run build:sandbox
 %USERPROFILE%\AppData\Local\cagent\bin\cagent-windows-sandbox-runner.exe
 ```
 
+当前控制面使用协议 v3，与旧的 v2 helper 不兼容。拉取本次源码后必须重新运行 `bun run build:sandbox`；脚本会原子替换固定位置的 runner。
+
 Ubuntu 可以运行控制面和离线测试，但不会注册内置 `Shell` 工具。其他平台尚未作为支持目标验证。
 
-发行 ZIP 已包含 runner，不需要本机 Rust 或 Visual Studio，但仍需要上述标准 PowerShell 7 安装。
+由当前源码构建、使用协议 v3 runner 的发行 ZIP 已包含 runner，不需要本机 Rust 或 Visual Studio，也不强制另行安装 PowerShell 7；标准 Windows 11 可回退到内置 Windows PowerShell 5.1。`Shell` 的首个命令应使用 5.1 兼容语法，返回结果会显式报告所选 engine、兼容版本与 fallback 状态，之后即可按已知引擎生成命令。runner 只在命令启动前选壳，命令一旦开始执行就绝不会换壳重跑。已发布的 v0.1.1 仍使用协议 v2，不包含这项回退能力。
 
 ### 4. 启动
 

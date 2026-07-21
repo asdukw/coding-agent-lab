@@ -4,6 +4,8 @@ mod security;
 
 use crate::protocol::ExecutionMode;
 use crate::protocol::MAX_WRITABLE_ROOTS;
+use crate::protocol::PowerShellEngine;
+use crate::protocol::PowerShellSummary;
 use crate::protocol::SandboxRequest;
 use process::ProcessSpec;
 use security::LocalSid;
@@ -21,6 +23,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows_sys::Win32::UI::Shell::CSIDL_PROGRAM_FILES;
 use windows_sys::Win32::UI::Shell::SHGFP_TYPE_CURRENT;
 use windows_sys::Win32::UI::Shell::SHGetFolderPathW;
@@ -43,6 +46,13 @@ pub struct RunResult {
     pub timed_out: bool,
     pub stdout_truncated: bool,
     pub stderr_truncated: bool,
+    pub shell: PowerShellSummary,
+}
+
+#[derive(Debug)]
+struct ResolvedPowerShell {
+    executable: PathBuf,
+    summary: PowerShellSummary,
 }
 
 #[derive(Debug)]
@@ -85,7 +95,7 @@ pub fn run(request: SandboxRequest) -> Result<RunResult, RunError> {
     // Keeping this handle open prevents PID reuse from changing which process
     // the runner monitors while it prepares the sandbox.
     let parent = process::ParentProcess::open(request.parent_pid)?;
-    let executable = trusted_powershell_executable()?;
+    let powershell = trusted_powershell_executable()?;
     let cwd = canonical_directory(Path::new(&request.cwd), "cwd")?;
 
     if matches!(request.execution_mode, ExecutionMode::DangerFullAccess) {
@@ -98,7 +108,7 @@ pub fn run(request: SandboxRequest) -> Result<RunResult, RunError> {
         let output = process::run(ProcessSpec {
             parent: &parent,
             token: None,
-            executable: &executable,
+            executable: &powershell.executable,
             args: &request.args,
             cwd: &cwd,
             env: &request.env,
@@ -112,6 +122,7 @@ pub fn run(request: SandboxRequest) -> Result<RunResult, RunError> {
             timed_out: output.timed_out,
             stdout_truncated: output.stdout_truncated,
             stderr_truncated: output.stderr_truncated,
+            shell: powershell.summary,
         });
     }
 
@@ -215,7 +226,7 @@ pub fn run(request: SandboxRequest) -> Result<RunResult, RunError> {
     let output = process::run(ProcessSpec {
         parent: &parent,
         token: Some(token.raw()),
-        executable: &executable,
+        executable: &powershell.executable,
         args: &request.args,
         cwd: &cwd,
         env: &environment,
@@ -230,6 +241,7 @@ pub fn run(request: SandboxRequest) -> Result<RunResult, RunError> {
         timed_out: output.timed_out,
         stdout_truncated: output.stdout_truncated,
         stderr_truncated: output.stderr_truncated,
+        shell: powershell.summary,
     })
 }
 
@@ -331,72 +343,242 @@ fn canonical_file(path: &Path, label: &str) -> Result<PathBuf, RunError> {
     Ok(canonical)
 }
 
-fn trusted_powershell_executable() -> Result<PathBuf, RunError> {
+fn trusted_powershell_executable() -> Result<ResolvedPowerShell, RunError> {
     // The release runner is x86_64, so CSIDL_PROGRAM_FILES resolves the native
     // Program Files directory (the same location exposed as ProgramW6432).
     // Do not accept mutable ProgramFiles/ProgramW6432 environment values as
     // additional trust roots.
     let program_files = program_files_directory()?;
     let search_path = std::env::var_os("PATH");
-    trusted_powershell_executable_from(&program_files, search_path.as_deref())
+    if let Some(powershell) = trusted_pwsh_executable_from(&program_files, search_path.as_deref())?
+    {
+        return Ok(powershell);
+    }
+
+    // Resolve the Windows directory only after every PowerShell 7 candidate is
+    // absent or untrusted. A failure here must not mask an already usable pwsh.
+    let system_directory = system_directory()?;
+    trusted_windows_powershell_fallback(&system_directory)
 }
 
+#[cfg(test)]
 fn trusted_powershell_executable_from(
     program_files: &Path,
     search_path: Option<&OsStr>,
-) -> Result<PathBuf, RunError> {
+    system_directory: &Path,
+) -> Result<ResolvedPowerShell, RunError> {
+    if let Some(powershell) = trusted_pwsh_executable_from(program_files, search_path)? {
+        return Ok(powershell);
+    }
+    trusted_windows_powershell_fallback(system_directory)
+}
+
+fn trusted_pwsh_executable_from(
+    program_files: &Path,
+    search_path: Option<&OsStr>,
+) -> Result<Option<ResolvedPowerShell>, RunError> {
     let windows_apps = program_files.join("WindowsApps");
 
     // PowerShell's MSI/winget installer uses this stable location, but it does
     // not add that directory to PATH in every host configuration. Probe it
     // directly before considering PATH entries.
     let standard_install = program_files.join("PowerShell").join("7").join("pwsh.exe");
-    if let Some(powershell) =
-        trusted_powershell_candidate(&standard_install, program_files, &windows_apps)?
-    {
-        return Ok(powershell);
+    if let Some(powershell) = trusted_powershell_candidate(
+        &standard_install,
+        program_files,
+        Some(&windows_apps),
+        "trusted PowerShell 7",
+    )? {
+        return Ok(Some(ResolvedPowerShell {
+            executable: powershell,
+            summary: PowerShellSummary {
+                engine: PowerShellEngine::Pwsh,
+                version: "7",
+                fallback: false,
+            },
+        }));
     }
 
     if let Some(search_path) = search_path {
         for directory in std::env::split_paths(search_path) {
             let candidate = directory.join("pwsh.exe");
-            if let Some(powershell) =
-                trusted_powershell_candidate(&candidate, program_files, &windows_apps)?
-            {
-                return Ok(powershell);
+            // PATH is caller-controlled and routinely contains unavailable or
+            // user-owned directories. Reject unrelated layouts without touching
+            // the filesystem; only plausible machine installs fail closed on
+            // probe errors other than NotFound.
+            if !has_supported_pwsh_layout(&candidate, program_files) {
+                continue;
+            }
+            if let Some(powershell) = trusted_powershell_candidate(
+                &candidate,
+                program_files,
+                Some(&windows_apps),
+                "trusted PowerShell 7",
+            )? {
+                if !has_supported_pwsh_layout(&powershell, program_files) {
+                    continue;
+                }
+                return Ok(Some(ResolvedPowerShell {
+                    executable: powershell,
+                    summary: PowerShellSummary {
+                        engine: PowerShellEngine::Pwsh,
+                        version: "7",
+                        fallback: false,
+                    },
+                }));
             }
         }
     }
 
+    Ok(None)
+}
+
+fn trusted_windows_powershell_fallback(
+    system_directory: &Path,
+) -> Result<ResolvedPowerShell, RunError> {
+    let candidate = system_directory
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    if let Some(powershell) = trusted_powershell_candidate(
+        &candidate,
+        system_directory,
+        None,
+        "trusted Windows PowerShell 5.1",
+    )? {
+        return Ok(ResolvedPowerShell {
+            executable: powershell,
+            summary: PowerShellSummary {
+                engine: PowerShellEngine::WindowsPowerShell,
+                version: "5.1",
+                fallback: true,
+            },
+        });
+    }
+
     Err(RunError::at(
         "resolve_executable",
-        "PowerShell 7 (pwsh.exe) was not found at Program Files\\PowerShell\\7 or as a regular file beneath Program Files on PATH; WindowsApps installations are unsupported under the restricted token",
+        "PowerShell 7 (pwsh.exe) was not found at Program Files\\PowerShell\\7 or in a Program Files\\PowerShell\\7-* directory on PATH, and Windows PowerShell 5.1 (powershell.exe) was not found beneath the system directory; WindowsApps aliases are not trusted execution candidates",
     ))
+}
+
+fn has_supported_pwsh_layout(powershell: &Path, program_files: &Path) -> bool {
+    let powershell_components = powershell.components().collect::<Vec<_>>();
+    if powershell_components
+        .iter()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return false;
+    }
+
+    let program_files_components = program_files.components().collect::<Vec<_>>();
+    if powershell_components.len() != program_files_components.len() + 3
+        || !powershell_components
+            .iter()
+            .zip(&program_files_components)
+            .all(|(candidate, trusted)| path_components_equal(*candidate, *trusted))
+    {
+        return false;
+    }
+
+    let suffix = &powershell_components[program_files_components.len()..];
+    let Some(product_directory) = normal_component_name(suffix[0]) else {
+        return false;
+    };
+    let Some(version_directory) = normal_component_name(suffix[1]) else {
+        return false;
+    };
+    let Some(executable_name) = normal_component_name(suffix[2]) else {
+        return false;
+    };
+
+    let version_directory = version_directory.to_string_lossy();
+    product_directory
+        .to_string_lossy()
+        .eq_ignore_ascii_case("PowerShell")
+        && (version_directory == "7" || version_directory.starts_with("7-"))
+        && executable_name
+            .to_string_lossy()
+            .eq_ignore_ascii_case("pwsh.exe")
+}
+
+fn normal_component_name<'a>(component: Component<'a>) -> Option<&'a OsStr> {
+    match component {
+        Component::Normal(name) => Some(name),
+        _ => None,
+    }
+}
+
+fn path_components_equal(left: Component<'_>, right: Component<'_>) -> bool {
+    match (left, right) {
+        (Component::Prefix(left), Component::Prefix(right)) => {
+            path_prefixes_equal(left.kind(), right.kind())
+        }
+        (Component::RootDir, Component::RootDir) => true,
+        (Component::Normal(left), Component::Normal(right)) => left
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy()),
+        _ => false,
+    }
+}
+
+fn path_prefixes_equal(left: Prefix<'_>, right: Prefix<'_>) -> bool {
+    match (left, right) {
+        (
+            Prefix::Disk(left) | Prefix::VerbatimDisk(left),
+            Prefix::Disk(right) | Prefix::VerbatimDisk(right),
+        ) => left.to_ascii_uppercase() == right.to_ascii_uppercase(),
+        _ => false,
+    }
 }
 
 fn trusted_powershell_candidate(
     candidate: &Path,
-    program_files: &Path,
-    windows_apps: &Path,
+    trusted_root: &Path,
+    excluded_root: Option<&Path>,
+    label: &str,
 ) -> Result<Option<PathBuf>, RunError> {
     let metadata = match std::fs::symlink_metadata(candidate) {
         Ok(metadata) => metadata,
-        Err(_) => return Ok(None),
+        Err(error) if candidate_error_allows_fallback(&error) => return Ok(None),
+        Err(error) => {
+            return Err(RunError::from_io(
+                "resolve_executable",
+                format!("inspect {label} candidate {}", candidate.display()),
+                error,
+            ));
+        }
     };
     // Ignore workspace-planted executables, directories named pwsh.exe, and
     // WindowsApps aliases. The final canonical path must remain a regular,
-    // non-reparse file inside the trusted system Program Files directory.
+    // non-reparse file inside its trusted machine directory.
     if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Ok(None);
     }
-    let powershell = canonical_file(candidate, "trusted PowerShell 7").map_err(|mut error| {
-        error.stage = "resolve_executable".to_owned();
-        error
-    })?;
-    if path_is_within(&powershell, program_files) && !path_is_within(&powershell, windows_apps) {
+    let powershell = match canonical_file(candidate, label) {
+        Ok(powershell) => powershell,
+        Err(error) if run_error_is_not_found(&error) => return Ok(None),
+        Err(mut error) => {
+            error.stage = "resolve_executable".to_owned();
+            return Err(error);
+        }
+    };
+    if path_is_within(&powershell, trusted_root)
+        && excluded_root.is_none_or(|root| !path_is_within(&powershell, root))
+    {
         return Ok(Some(powershell));
     }
     Ok(None)
+}
+
+fn candidate_error_allows_fallback(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound
+}
+
+fn run_error_is_not_found(error: &RunError) -> bool {
+    error.windows_error_code.is_some_and(|code| {
+        std::io::Error::from_raw_os_error(code as i32).kind() == std::io::ErrorKind::NotFound
+    })
 }
 
 fn program_files_directory() -> Result<PathBuf, RunError> {
@@ -425,6 +607,32 @@ fn program_files_directory() -> Result<PathBuf, RunError> {
     buffer.truncate(length);
     let path = PathBuf::from(OsString::from_wide(&buffer));
     canonical_directory(&path, "Program Files").map_err(|mut error| {
+        error.stage = "resolve_executable".to_owned();
+        error
+    })
+}
+
+fn system_directory() -> Result<PathBuf, RunError> {
+    let mut buffer = vec![0_u16; 260];
+    loop {
+        let length = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
+        if length == 0 {
+            return Err(RunError::from_io(
+                "resolve_executable",
+                "GetSystemDirectoryW failed",
+                std::io::Error::last_os_error(),
+            ));
+        }
+        let length = length as usize;
+        if length < buffer.len() {
+            buffer.truncate(length);
+            break;
+        }
+        buffer.resize(length, 0);
+    }
+
+    let path = PathBuf::from(OsString::from_wide(&buffer));
+    canonical_directory(&path, "system directory").map_err(|mut error| {
         error.stage = "resolve_executable".to_owned();
         error
     })
@@ -1351,6 +1559,12 @@ mod tests {
         canonical_directory(path, "test Program Files").expect("canonicalize test directory")
     }
 
+    fn create_test_system_directory(temporary: &TestDirectory) -> PathBuf {
+        let system_directory = temporary.path.join("Windows").join("System32");
+        std::fs::create_dir_all(&system_directory).expect("create test system directory");
+        canonical_test_directory(&system_directory)
+    }
+
     fn valid_parent_pid() -> u32 {
         let current = std::process::id();
         if current == u32::MAX {
@@ -1393,20 +1607,38 @@ mod tests {
     }
 
     #[test]
-    fn standard_powershell_install_is_found_without_path() {
+    fn standard_powershell_install_is_preferred_over_path_and_fallback() {
         let temporary = TestDirectory::create();
         let program_files = temporary.path.join("Program Files");
         let executable = program_files.join("PowerShell").join("7").join("pwsh.exe");
         create_test_executable(&executable);
+        let path_directory = program_files.join("PowerShell").join("7-preview");
+        create_test_executable(&path_directory.join("pwsh.exe"));
         let program_files = canonical_test_directory(&program_files);
+        let system_directory = create_test_system_directory(&temporary);
+        create_test_executable(
+            &system_directory
+                .join("WindowsPowerShell")
+                .join("v1.0")
+                .join("powershell.exe"),
+        );
+        let search_path =
+            std::env::join_paths([path_directory]).expect("construct test search path");
 
-        let resolved = trusted_powershell_executable_from(&program_files, None)
-            .expect("standard PowerShell install should be trusted");
+        let resolved = trusted_powershell_executable_from(
+            &program_files,
+            Some(search_path.as_os_str()),
+            &system_directory,
+        )
+        .expect("standard PowerShell install should be trusted");
 
         assert_eq!(
-            resolved,
+            resolved.executable,
             canonical_file(&executable, "test PowerShell").expect("canonicalize test executable")
         );
+        assert!(matches!(resolved.summary.engine, PowerShellEngine::Pwsh));
+        assert_eq!(resolved.summary.version, "7");
+        assert!(!resolved.summary.fallback);
     }
 
     #[test]
@@ -1417,17 +1649,156 @@ mod tests {
         let executable = install_directory.join("pwsh.exe");
         create_test_executable(&executable);
         let program_files = canonical_test_directory(&program_files);
+        let system_directory = create_test_system_directory(&temporary);
+        create_test_executable(
+            &system_directory
+                .join("WindowsPowerShell")
+                .join("v1.0")
+                .join("powershell.exe"),
+        );
         let search_path =
             std::env::join_paths([install_directory]).expect("construct test search path");
 
-        let resolved =
-            trusted_powershell_executable_from(&program_files, Some(search_path.as_os_str()))
-                .expect("trusted PATH PowerShell should be found");
+        let resolved = trusted_powershell_executable_from(
+            &program_files,
+            Some(search_path.as_os_str()),
+            &system_directory,
+        )
+        .expect("trusted PATH PowerShell should be found");
 
         assert_eq!(
-            resolved,
+            resolved.executable,
             canonical_file(&executable, "test PowerShell").expect("canonicalize test executable")
         );
+        assert!(matches!(resolved.summary.engine, PowerShellEngine::Pwsh));
+        assert_eq!(resolved.summary.version, "7");
+        assert!(!resolved.summary.fallback);
+    }
+
+    #[test]
+    fn pwsh_path_layout_filter_is_strict_and_case_insensitive() {
+        let program_files = Path::new(r"\\?\C:\Program Files");
+
+        assert!(has_supported_pwsh_layout(
+            Path::new(r"c:\PROGRAM FILES\powershell\7\PWSH.EXE"),
+            program_files,
+        ));
+        assert!(has_supported_pwsh_layout(
+            Path::new(r"C:\Program Files\PowerShell\7-PREVIEW\pwsh.exe"),
+            program_files,
+        ));
+        assert!(!has_supported_pwsh_layout(
+            Path::new(r"C:\Program Files\PowerShell\7-preview\..\7\pwsh.exe"),
+            program_files,
+        ));
+        assert!(!has_supported_pwsh_layout(
+            Path::new(r"C:\Program Files\PowerShell\7-preview\bin\pwsh.exe"),
+            program_files,
+        ));
+    }
+
+    #[test]
+    fn unrelated_unprobeable_path_entry_does_not_block_windows_powershell_fallback() {
+        let temporary = TestDirectory::create();
+        let program_files = temporary.path.join("Program Files");
+        std::fs::create_dir_all(&program_files).expect("create test Program Files");
+        let unprobeable_directory = program_files.join("unrelated\0directory");
+        let program_files = canonical_test_directory(&program_files);
+        let system_directory = create_test_system_directory(&temporary);
+        let executable = system_directory
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe");
+        create_test_executable(&executable);
+        let search_path = unprobeable_directory.into_os_string();
+
+        let resolved = trusted_powershell_executable_from(
+            &program_files,
+            Some(search_path.as_os_str()),
+            &system_directory,
+        )
+        .expect("unrelated PATH entry must be ignored before filesystem probing");
+
+        assert_eq!(
+            resolved.executable,
+            canonical_file(&executable, "test Windows PowerShell")
+                .expect("canonicalize test executable")
+        );
+        assert!(matches!(
+            resolved.summary.engine,
+            PowerShellEngine::WindowsPowerShell
+        ));
+    }
+
+    #[test]
+    fn wrong_major_pwsh_on_path_is_rejected() {
+        let temporary = TestDirectory::create();
+        let program_files = temporary.path.join("Program Files");
+        let install_directory = program_files.join("PowerShell").join("6");
+        create_test_executable(&install_directory.join("pwsh.exe"));
+        let program_files = canonical_test_directory(&program_files);
+        let system_directory = create_test_system_directory(&temporary);
+        let search_path =
+            std::env::join_paths([install_directory]).expect("construct test search path");
+
+        let error = trusted_powershell_executable_from(
+            &program_files,
+            Some(search_path.as_os_str()),
+            &system_directory,
+        )
+        .expect_err("non-7.x PowerShell on PATH must be rejected");
+
+        assert_eq!(error.stage, "resolve_executable");
+    }
+
+    #[test]
+    fn pwsh_outside_powershell_subtree_on_path_is_rejected() {
+        let temporary = TestDirectory::create();
+        let program_files = temporary.path.join("Program Files");
+        let install_directory = program_files.join("Vendor").join("7");
+        create_test_executable(&install_directory.join("pwsh.exe"));
+        let program_files = canonical_test_directory(&program_files);
+        let system_directory = create_test_system_directory(&temporary);
+        let search_path =
+            std::env::join_paths([install_directory]).expect("construct test search path");
+
+        let error = trusted_powershell_executable_from(
+            &program_files,
+            Some(search_path.as_os_str()),
+            &system_directory,
+        )
+        .expect_err("pwsh outside Program Files\\PowerShell must be rejected");
+
+        assert_eq!(error.stage, "resolve_executable");
+    }
+
+    #[test]
+    fn windows_powershell_is_used_only_after_pwsh_is_not_found() {
+        let temporary = TestDirectory::create();
+        let program_files = temporary.path.join("Program Files");
+        std::fs::create_dir_all(&program_files).expect("create test Program Files");
+        let system_directory = create_test_system_directory(&temporary);
+        let executable = system_directory
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe");
+        create_test_executable(&executable);
+        let program_files = canonical_test_directory(&program_files);
+
+        let resolved = trusted_powershell_executable_from(&program_files, None, &system_directory)
+            .expect("Windows PowerShell fallback should be trusted");
+
+        assert_eq!(
+            resolved.executable,
+            canonical_file(&executable, "test Windows PowerShell")
+                .expect("canonicalize test executable")
+        );
+        assert!(matches!(
+            resolved.summary.engine,
+            PowerShellEngine::WindowsPowerShell
+        ));
+        assert_eq!(resolved.summary.version, "5.1");
+        assert!(resolved.summary.fallback);
     }
 
     #[test]
@@ -1438,18 +1809,22 @@ mod tests {
         let outside_directory = temporary.path.join("workspace-bin");
         create_test_executable(&outside_directory.join("pwsh.exe"));
         let program_files = canonical_test_directory(&program_files);
+        let system_directory = create_test_system_directory(&temporary);
         let search_path =
             std::env::join_paths([outside_directory]).expect("construct test search path");
 
-        let error =
-            trusted_powershell_executable_from(&program_files, Some(search_path.as_os_str()))
-                .expect_err("PowerShell outside Program Files must be rejected");
+        let error = trusted_powershell_executable_from(
+            &program_files,
+            Some(search_path.as_os_str()),
+            &system_directory,
+        )
+        .expect_err("PowerShell outside Program Files must be rejected");
 
         assert_eq!(error.stage, "resolve_executable");
     }
 
     #[test]
-    fn windows_apps_alias_and_non_file_candidates_are_rejected() {
+    fn windows_apps_alias_and_non_file_candidates_allow_windows_powershell_fallback() {
         let temporary = TestDirectory::create();
         let program_files = temporary.path.join("Program Files");
         let standard_candidate = program_files.join("PowerShell").join("7").join("pwsh.exe");
@@ -1458,13 +1833,50 @@ mod tests {
         let windows_apps = program_files.join("WindowsApps");
         create_test_executable(&windows_apps.join("pwsh.exe"));
         let program_files = canonical_test_directory(&program_files);
+        let system_directory = create_test_system_directory(&temporary);
+        let fallback_executable = system_directory
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe");
+        create_test_executable(&fallback_executable);
         let search_path = std::env::join_paths([windows_apps]).expect("construct test search path");
 
-        let error =
-            trusted_powershell_executable_from(&program_files, Some(search_path.as_os_str()))
-                .expect_err("WindowsApps and non-file candidates must be rejected");
+        let resolved = trusted_powershell_executable_from(
+            &program_files,
+            Some(search_path.as_os_str()),
+            &system_directory,
+        )
+        .expect("WindowsApps and non-file candidates must be skipped before fallback");
 
+        assert_eq!(
+            resolved.executable,
+            canonical_file(&fallback_executable, "test Windows PowerShell")
+                .expect("canonicalize test executable")
+        );
+        assert!(matches!(
+            resolved.summary.engine,
+            PowerShellEngine::WindowsPowerShell
+        ));
+        assert_eq!(resolved.summary.version, "5.1");
+        assert!(resolved.summary.fallback);
+    }
+
+    #[test]
+    fn only_not_found_candidate_errors_allow_fallback() {
+        let not_found = std::io::Error::from_raw_os_error(2);
+        let access_denied = std::io::Error::from_raw_os_error(5);
+
+        assert!(candidate_error_allows_fallback(&not_found));
+        assert!(!candidate_error_allows_fallback(&access_denied));
+
+        let error = RunError::from_io(
+            "resolve_executable",
+            "inspect test PowerShell candidate",
+            access_denied,
+        );
         assert_eq!(error.stage, "resolve_executable");
+        assert_eq!(error.windows_error_code, Some(5));
+        assert!(error.message.contains("inspect test PowerShell candidate"));
     }
 
     #[test]

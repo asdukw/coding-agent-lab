@@ -4,7 +4,7 @@
 
 ## 构建与安装
 
-前置条件：Windows 11 x64、PowerShell 7、`rustup`、`1.96.0-x86_64-pc-windows-msvc`，以及带 C++ x64 工具链的 Visual Studio 2022 Build Tools/Community。仓库内的 `rust-toolchain.toml` 同时固定该版本及 `rustfmt`、`clippy` 组件。
+前置条件：Windows 11 x64、`rustup`、`1.96.0-x86_64-pc-windows-msvc`，以及带 C++ x64 工具链的 Visual Studio 2022 Build Tools/Community。`bun run build:sandbox` 由系统 Windows PowerShell 5.1 驱动；PowerShell 7 是运行命令时的可选首选引擎，不是构建前置条件。仓库内的 `rust-toolchain.toml` 同时固定该版本及 `rustfmt`、`clippy` 组件。
 
 在仓库根目录运行：
 
@@ -18,6 +18,8 @@ bun run build:sandbox
 %USERPROFILE%\AppData\Local\cagent\bin\cagent-windows-sandbox-runner.exe
 ```
 
+协议 v3 与旧的 v2 helper 不兼容。拉取使用 v3 的控制面源码后必须重新运行 `bun run build:sandbox`；安装脚本会原子替换上述固定位置的 runner。
+
 CI 或只需要产物、不希望写入固定 helper 安装目录时，直接给脚本传入绝对 Cargo 目标目录，不要使用 `-Install`：
 
 ```powershell
@@ -29,7 +31,7 @@ $cargoTargetDir = Join-Path $env:TEMP "cagent-windows-sandbox-runner-target"
 
 ## 执行流程
 
-1. CLI 启动时固定 workspace 根，并校验 helper 的规范路径和文件类型；runner 在 PATH 中查找 PowerShell 7，但只接受规范路径位于系统 Program Files 下的普通文件，不接受客户端指定 executable，恢复的 session 也不能动态扩大 workspace 根。
+1. CLI 启动时固定 workspace 根，并校验 helper 的规范路径和文件类型；runner 依次解析固定的 `Program Files\PowerShell\7\pwsh.exe`、PATH 中规范化后位于 `Program Files\PowerShell\7` 或 `7-*` 目录的普通 `pwsh.exe`，最后是由 `GetSystemDirectoryW()` 定位的 `WindowsPowerShell\v1.0\powershell.exe`。PATH 条目会先经过无 I/O 的严格词法布局过滤，无关目录直接忽略；只有进入可信布局的 PATH 候选和两个固定候选才会触发文件探测，对这些候选仅 `NotFound` 会继续解析，其他 I/O 错误均 fail closed。候选不满足普通、非 reparse 文件及 canonical containment 约束时也会继续下一项；命令一旦启动就不会换壳重试。客户端不能指定 executable，恢复的 session 也不能动态扩大 workspace 根。
 2. runner 严格校验协议和 `cwd`。`workspace_write` 还会校验带本地盘符的绝对写根、非盘符根、互不重叠的写根，以及 `cwd` 必须位于某个写根内；M1 不额外查询 drive type 或证明文件系统一定是 NTFS。`danger_full_access` 不解析或安装写根 ACL。
 3. 在 `workspace_write` 下，runner 先在 workspace 内安全地实体化 `.cagent`，再为每个写根派生路径作用域 capability SID。扫描到多硬链接普通文件时，会为本 workspace 的合成 SID 安装精确的 deny-mutation ACE，使该文件在沙箱中可读但不可写；首次安装根 ACE 时仍会拒绝任意已有 reparse point，避免自动继承传播越过路径边界。扫描通过后写入持久、可继承且幂等的 allow ACE；已有 ACE 时跳过重复传播，敏感路径另加 deny ACE。
 4. 在 `workspace_write` 下，runner 在首个 workspace 的 `.cagent-sandbox/profiles/` 中逐级校验并创建每请求唯一的临时 profile，单独授予 capability，并覆盖 `USERPROFILE`、`HOME`、`APPDATA`、`LOCALAPPDATA`、`TEMP`、`TMP`、`HOMEDRIVE`、`HOMEPATH`。结束时仅在路径仍规范地位于该 workspace、且未变成 reparse point 时 best-effort 删除。
@@ -84,11 +86,11 @@ M1 也不是保密边界：目标仍可读取当前用户有权读取的文件�
 
 ## 协议
 
-runner 从 stdin 读取不超过 1 MiB 的单个 JSON 请求，并向 stdout 写一个 JSON 响应。协议版本为 `2`。
+runner 从 stdin 读取不超过 1 MiB 的单个 JSON 请求，并向 stdout 写一个 JSON 响应。协议版本为 `3`。
 
-请求字段：`version`、`request_id`、`parent_pid`、`execution_mode`、`args`、`cwd`、`writable_roots`、`env`、`timeout_ms`、`max_output_bytes`。`execution_mode` 可取 `workspace_write` 或 `danger_full_access`；缺省时按 `workspace_write` 处理。`parent_pid` 必须是仍存活且不同于 runner 的宿主进程；目标固定为 PATH 中发现、规范化后位于系统 Program Files 下的 `pwsh.exe`。
+请求字段：`version`、`request_id`、`parent_pid`、`execution_mode`、`args`、`cwd`、`writable_roots`、`env`、`timeout_ms`、`max_output_bytes`。`execution_mode` 可取 `workspace_write` 或 `danger_full_access`；缺省时按 `workspace_write` 处理。`parent_pid` 必须是仍存活且不同于 runner 的宿主进程；客户端不能指定 executable，目标由执行流程第 1 步在命令启动前解析。
 
-响应包含 `status`、退出码、stdout/stderr、超时与截断标记、结构化 Windows 错误，以及协议声明的 enforcement 模式。错误响应也会声明目标模式，它不表示失败前所有 enforcement 步骤都已实际施加。未知字段、版本不匹配，以及当前执行模式所需的路径或 ACL 校验失败都会 fail closed。
+响应包含 `status`、退出码、stdout/stderr、超时与截断标记、结构化 Windows 错误、协议声明的 enforcement 模式，以及实际选用的 `shell`。成功响应的 `shell` 为 `{engine:"pwsh",version:"7",fallback:false}` 或 `{engine:"windows_powershell",version:"5.1",fallback:true}`，错误响应则为 `null`；`fallback` 表示命令启动前选择了兼容引擎，并不表示失败后重跑。错误响应也会声明目标模式，它不表示失败前所有 enforcement 步骤都已实际施加。未知字段、版本不匹配，以及当前执行模式所需的路径或 ACL 校验失败都会 fail closed。
 
 ## 借鉴与后续
 

@@ -16,6 +16,7 @@ import {
 	type WindowsSandboxOptions,
 	type WindowsSandboxRunRequest,
 	type WindowsSandboxRunResult,
+	type WindowsSandboxShell,
 } from "./types";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -55,9 +56,15 @@ const RESPONSE_KEYS = new Set([
 	"stderr_truncated",
 	"error",
 	"enforcement",
+	"shell",
 ]);
+const LEGACY_V2_RESPONSE_KEYS = new Set(
+	[...RESPONSE_KEYS].filter((key) => key !== "shell"),
+);
 const ERROR_KEYS = new Set(["stage", "message", "windows_error_code"]);
 const ENFORCEMENT_KEYS = new Set(["filesystem", "process_tree", "network"]);
+const SHELL_KEYS = new Set(["engine", "version", "fallback"]);
+const LEGACY_V2_PROTOCOL_ERROR_MESSAGE = `unsupported protocol version ${WINDOWS_SANDBOX_PROTOCOL_VERSION}; expected 2`;
 
 const ALLOWED_ENVIRONMENT_KEYS = [
 	"ComSpec",
@@ -328,12 +335,13 @@ export class WindowsSandbox implements WindowsSandboxExecutor {
 			});
 
 			return {
-				exitCode: response.exit_code as number,
+				exitCode: response.exit_code,
 				stdout: response.stdout,
 				stderr: response.stderr,
 				timedOut: response.timed_out,
 				stdoutTruncated: response.stdout_truncated,
 				stderrTruncated: response.stderr_truncated,
+				shell: response.shell,
 				enforcement: response.enforcement,
 				networkIsolated: false,
 				networkNotice:
@@ -360,7 +368,7 @@ async function executeNativeHelper(options: {
 	signal?: AbortSignal;
 	watchdogMs: number;
 	maxProtocolBytes: number;
-}): Promise<WindowsSandboxNativeResponse> {
+}): Promise<Extract<WindowsSandboxNativeResponse, { status: "ok" }>> {
 	throwIfAborted(options.signal);
 
 	let child: ChildProcessWithoutNullStreams;
@@ -493,7 +501,7 @@ async function executeNativeHelper(options: {
 			options.request.execution_mode,
 		);
 		if (response.status === "error") {
-			const error = response.error as WindowsSandboxErrorPayload;
+			const error = response.error;
 			throw new WindowsSandboxError(
 				`${error.stage}: ${error.message}${formatHelperStderr(helperStderr.text)}`,
 				{
@@ -541,7 +549,8 @@ async function executeNativeHelper(options: {
 	}
 }
 
-function parseNativeResponse(
+/** @internal Exported from this implementation module for protocol fixture tests. */
+export function parseNativeResponse(
 	text: string,
 	expectedRequestId: string,
 	expectedExecutionMode: WindowsSandboxExecutionMode,
@@ -556,6 +565,12 @@ function parseNativeResponse(
 		);
 	}
 	const response = requireRecord(value, "sandbox response");
+	if (isLegacyV2ProtocolMismatch(response, expectedRequestId)) {
+		throw new WindowsSandboxError(
+			`The installed Windows sandbox helper only supports protocol v2, but this client requires protocol v${WINDOWS_SANDBOX_PROTOCOL_VERSION}. Run \`bun run build:sandbox\` to rebuild and install the current helper.`,
+			{ stage: "helper_protocol_mismatch" },
+		);
+	}
 	assertExactKeys(response, RESPONSE_KEYS, "sandbox response");
 	const status = requireEnum(response.status, ["ok", "error"], "status");
 	const requestId = requireString(response.request_id, "request_id");
@@ -571,28 +586,14 @@ function parseNativeResponse(
 	);
 	const error =
 		response.error === null ? null : parseErrorPayload(response.error);
+	const shell = response.shell === null ? null : parseShell(response.shell);
 	const exitCode =
 		response.exit_code === null
 			? null
 			: requireInteger(response.exit_code, "exit_code");
 
-	if (status === "ok" && (exitCode === null || error !== null)) {
-		throw new WindowsSandboxError(
-			"An ok sandbox response must contain an exit code and no error.",
-			{ stage: "validate_response", enforcement },
-		);
-	}
-	if (status === "error" && (exitCode !== null || error === null)) {
-		throw new WindowsSandboxError(
-			"An error sandbox response must contain an error and no exit code.",
-			{ stage: "validate_response", enforcement },
-		);
-	}
-
-	return {
-		status,
+	const common = {
 		request_id: requestId,
-		exit_code: exitCode,
 		stdout: requireString(response.stdout, "stdout"),
 		stderr: requireString(response.stderr, "stderr"),
 		timed_out: requireBoolean(response.timed_out, "timed_out"),
@@ -604,9 +605,89 @@ function parseNativeResponse(
 			response.stderr_truncated,
 			"stderr_truncated",
 		),
-		error,
 		enforcement,
 	};
+	if (status === "ok") {
+		if (exitCode === null || error !== null || shell === null) {
+			throw new WindowsSandboxError(
+				"An ok sandbox response must contain an exit code and shell metadata, and no error.",
+				{ stage: "validate_response", enforcement },
+			);
+		}
+		return {
+			...common,
+			status,
+			exit_code: exitCode,
+			error: null,
+			shell,
+		};
+	}
+	if (exitCode !== null || error === null || shell !== null) {
+		throw new WindowsSandboxError(
+			"An error sandbox response must contain an error, no exit code, and no shell metadata.",
+			{ stage: "validate_response", enforcement },
+		);
+	}
+	return {
+		...common,
+		status,
+		exit_code: null,
+		error,
+		shell: null,
+	};
+}
+
+function isLegacyV2ProtocolMismatch(
+	response: Record<string, unknown>,
+	expectedRequestId: string,
+): boolean {
+	if (!hasExactKeys(response, LEGACY_V2_RESPONSE_KEYS)) {
+		return false;
+	}
+	if (
+		response.status !== "error" ||
+		response.request_id !== expectedRequestId ||
+		response.exit_code !== null ||
+		response.stdout !== "" ||
+		response.stderr !== "" ||
+		response.timed_out !== false ||
+		response.stdout_truncated !== false ||
+		response.stderr_truncated !== false
+	) {
+		return false;
+	}
+
+	const error = response.error;
+	if (
+		typeof error !== "object" ||
+		error === null ||
+		Array.isArray(error) ||
+		!hasExactKeys(error, ERROR_KEYS)
+	) {
+		return false;
+	}
+	const errorRecord = error as Record<string, unknown>;
+	if (
+		errorRecord.stage !== "validate_request" ||
+		errorRecord.message !== LEGACY_V2_PROTOCOL_ERROR_MESSAGE ||
+		errorRecord.windows_error_code !== null
+	) {
+		return false;
+	}
+
+	const enforcement = response.enforcement;
+	return (
+		typeof enforcement === "object" &&
+		enforcement !== null &&
+		!Array.isArray(enforcement) &&
+		hasExactKeys(enforcement, ENFORCEMENT_KEYS) &&
+		(enforcement as Record<string, unknown>).filesystem ===
+			"write_restricted_acl" &&
+		(enforcement as Record<string, unknown>).process_tree ===
+			"job_members_kill_on_close" &&
+		(enforcement as Record<string, unknown>).network ===
+			"inherited_not_isolated"
+	);
 }
 
 function parseEnforcement(
@@ -655,6 +736,29 @@ function parseErrorPayload(value: unknown): WindowsSandboxErrorPayload {
 		message: requireString(record.message, "error.message"),
 		windows_error_code: windowsErrorCode,
 	};
+}
+
+function parseShell(value: unknown): WindowsSandboxShell {
+	const record = requireRecord(value, "shell");
+	assertExactKeys(record, SHELL_KEYS, "shell");
+	const engine = requireEnum(
+		record.engine,
+		["pwsh", "windows_powershell"],
+		"shell.engine",
+	);
+	const version = requireEnum(record.version, ["7", "5.1"], "shell.version");
+	const fallback = requireBoolean(record.fallback, "shell.fallback");
+
+	if (engine === "pwsh" && version === "7" && !fallback) {
+		return { engine, version, fallback };
+	}
+	if (engine === "windows_powershell" && version === "5.1" && fallback) {
+		return { engine, version, fallback };
+	}
+	throw new WindowsSandboxError(
+		"shell metadata must be either pwsh 7 without fallback or Windows PowerShell 5.1 with fallback.",
+		{ stage: "validate_response" },
+	);
 }
 
 async function resolveHelperPath(
@@ -745,7 +849,7 @@ function sanitizedEnvironment(): Record<string, string> {
 			environment[key] = value;
 		}
 	}
-	environment.CAGENT_SANDBOX = "windows-v2";
+	environment.CAGENT_SANDBOX = "windows-v3";
 	return environment;
 }
 
@@ -1071,6 +1175,13 @@ function assertExactKeys(
 			{ stage },
 		);
 	}
+}
+
+function hasExactKeys(record: object, expected: ReadonlySet<string>): boolean {
+	const keys = Object.keys(record);
+	return (
+		keys.length === expected.size && keys.every((key) => expected.has(key))
+	);
 }
 
 function requireString(value: unknown, label: string): string {

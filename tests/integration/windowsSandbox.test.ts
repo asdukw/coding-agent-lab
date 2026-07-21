@@ -73,15 +73,23 @@ integrationTest(
 			const roundTrip = await sandbox.runPowerShell({
 				command: [
 					"Set-Content -LiteralPath 'allowed.txt' -Value 'inside-ok'",
-					"Write-Output 'e2e-stdout'",
-					"[Console]::Error.WriteLine('e2e-stderr')",
+					"Write-Output 'e2e-stdout-中文'",
+					"[Console]::Error.WriteLine('e2e-stderr-中文')",
 					"exit 7",
 				].join("\n"),
 			});
 			expect(roundTrip.exitCode).toBe(7);
-			expect(roundTrip.stdout).toContain("e2e-stdout");
-			expect(roundTrip.stderr).toContain("e2e-stderr");
+			expect(roundTrip.stdout).toContain("e2e-stdout-中文");
+			expect(roundTrip.stderr).toContain("e2e-stderr-中文");
 			expect(roundTrip.timedOut).toBe(false);
+			expect([
+				{ engine: "pwsh", version: "7", fallback: false },
+				{
+					engine: "windows_powershell",
+					version: "5.1",
+					fallback: true,
+				},
+			]).toContainEqual(roundTrip.shell);
 			expect(roundTrip.enforcement).toEqual({
 				filesystem: "write_restricted_acl",
 				process_tree: "job_members_kill_on_close",
@@ -208,7 +216,8 @@ integrationTest(
 			);
 			const timedOut = await sandbox.runPowerShell({
 				command: [
-					"$powershell = Join-Path $PSHOME 'pwsh.exe'",
+					"$powershellName = if ($PSVersionTable.PSVersion.Major -ge 7) { 'pwsh.exe' } else { 'powershell.exe' }",
+					"$powershell = Join-Path $PSHOME $powershellName",
 					`$child = Start-Process -FilePath $powershell -ArgumentList @('-NoProfile', '-NonInteractive', '-EncodedCommand', '${encodedChild}') -WindowStyle Hidden -PassThru`,
 					"Set-Content -LiteralPath 'child.pid' -Value $child.Id",
 					"Start-Sleep -Seconds 60",

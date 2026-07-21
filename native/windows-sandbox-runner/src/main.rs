@@ -46,6 +46,7 @@ fn run() -> SandboxResponse {
                     timed_out: result.timed_out,
                     stdout_truncated: result.stdout_truncated,
                     stderr_truncated: result.stderr_truncated,
+                    shell: result.shell,
                 },
                 enforcement,
             ),
@@ -181,8 +182,8 @@ mod tests {
     #[test]
     fn duplicate_field_is_a_parse_error() {
         let request = br#"{
-            "version": 2,
-            "version": 2,
+            "version": 3,
+            "version": 3,
             "request_id": "request-1",
             "parent_pid": 1,
             "cwd": "C:/workspace",

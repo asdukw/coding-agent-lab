@@ -1,4 +1,4 @@
-export const WINDOWS_SANDBOX_PROTOCOL_VERSION = 2 as const;
+export const WINDOWS_SANDBOX_PROTOCOL_VERSION = 3 as const;
 
 export const WINDOWS_SANDBOX_NETWORK_NOTICE =
 	"Network access is inherited from the host and is not isolated by the Windows sandbox.";
@@ -27,6 +27,18 @@ export type WindowsSandboxErrorPayload = {
 	windows_error_code: number | null;
 };
 
+export type WindowsSandboxShell =
+	| {
+			engine: "pwsh";
+			version: "7";
+			fallback: false;
+	  }
+	| {
+			engine: "windows_powershell";
+			version: "5.1";
+			fallback: true;
+	  };
+
 export type WindowsSandboxNativeRequest = {
 	version: typeof WINDOWS_SANDBOX_PROTOCOL_VERSION;
 	request_id: string;
@@ -40,18 +52,31 @@ export type WindowsSandboxNativeRequest = {
 	max_output_bytes: number;
 };
 
-export type WindowsSandboxNativeResponse = {
-	status: "ok" | "error";
+type WindowsSandboxNativeResponseBase = {
 	request_id: string;
-	exit_code: number | null;
 	stdout: string;
 	stderr: string;
 	timed_out: boolean;
 	stdout_truncated: boolean;
 	stderr_truncated: boolean;
-	error: WindowsSandboxErrorPayload | null;
 	enforcement: WindowsSandboxEnforcement;
 };
+
+export type WindowsSandboxNativeResponse = WindowsSandboxNativeResponseBase &
+	(
+		| {
+				status: "ok";
+				exit_code: number;
+				error: null;
+				shell: WindowsSandboxShell;
+		  }
+		| {
+				status: "error";
+				exit_code: null;
+				error: WindowsSandboxErrorPayload;
+				shell: null;
+		  }
+	);
 
 export type WindowsSandboxRunRequest = {
 	command: string;
@@ -70,6 +95,7 @@ export type WindowsSandboxRunResult = {
 	timedOut: boolean;
 	stdoutTruncated: boolean;
 	stderrTruncated: boolean;
+	shell: WindowsSandboxShell;
 	enforcement: WindowsSandboxEnforcement;
 	networkIsolated: false;
 	networkNotice:

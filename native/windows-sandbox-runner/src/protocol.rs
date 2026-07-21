@@ -2,7 +2,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 pub const MAX_REQUEST_BYTES: u64 = 1024 * 1024;
 pub const MAX_WRITABLE_ROOTS: usize = 4;
 
@@ -45,6 +45,7 @@ pub struct SandboxResponse {
     pub stderr_truncated: bool,
     pub error: Option<SandboxError>,
     pub enforcement: EnforcementSummary,
+    pub shell: Option<PowerShellSummary>,
 }
 
 #[derive(Debug, Serialize)]
@@ -68,6 +69,21 @@ pub struct EnforcementSummary {
     pub network: &'static str,
 }
 
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PowerShellEngine {
+    Pwsh,
+    #[serde(rename = "windows_powershell")]
+    WindowsPowerShell,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct PowerShellSummary {
+    pub engine: PowerShellEngine,
+    pub version: &'static str,
+    pub fallback: bool,
+}
+
 pub struct SandboxSuccess {
     pub exit_code: i32,
     pub stdout: String,
@@ -75,6 +91,7 @@ pub struct SandboxSuccess {
     pub timed_out: bool,
     pub stdout_truncated: bool,
     pub stderr_truncated: bool,
+    pub shell: PowerShellSummary,
 }
 
 impl EnforcementSummary {
@@ -119,6 +136,7 @@ impl SandboxResponse {
             stderr_truncated: output.stderr_truncated,
             error: None,
             enforcement,
+            shell: Some(output.shell),
         }
     }
 
@@ -159,6 +177,7 @@ impl SandboxResponse {
                 windows_error_code,
             }),
             enforcement,
+            shell: None,
         }
     }
 }
@@ -215,6 +234,11 @@ mod tests {
                 timed_out: true,
                 stdout_truncated: true,
                 stderr_truncated: false,
+                shell: PowerShellSummary {
+                    engine: PowerShellEngine::Pwsh,
+                    version: "7",
+                    fallback: false,
+                },
             },
             EnforcementSummary::windows_v1(),
         );
@@ -237,6 +261,11 @@ mod tests {
                     "filesystem": "write_restricted_acl",
                     "process_tree": "job_members_kill_on_close",
                     "network": "inherited_not_isolated"
+                },
+                "shell": {
+                    "engine": "pwsh",
+                    "version": "7",
+                    "fallback": false
                 }
             })
         );
@@ -269,7 +298,28 @@ mod tests {
                     "filesystem": "write_restricted_acl",
                     "process_tree": "job_members_kill_on_close",
                     "network": "inherited_not_isolated"
-                }
+                },
+                "shell": null
+            })
+        );
+    }
+
+    #[test]
+    fn windows_powershell_engine_uses_the_protocol_name() {
+        let summary = PowerShellSummary {
+            engine: PowerShellEngine::WindowsPowerShell,
+            version: "5.1",
+            fallback: true,
+        };
+
+        let value = serde_json::to_value(summary).expect("serialize shell summary");
+
+        assert_eq!(
+            value,
+            json!({
+                "engine": "windows_powershell",
+                "version": "5.1",
+                "fallback": true
             })
         );
     }

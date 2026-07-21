@@ -4,6 +4,7 @@ import {
 	getWindowsSandboxWorkspaceRoot,
 	WINDOWS_FULL_ACCESS_NOTICE,
 	WINDOWS_SANDBOX_NETWORK_NOTICE,
+	type WindowsSandboxShell,
 } from "../sandbox";
 import { hasDangerFullAccess } from "../state";
 import { ToolFailureError } from "./errors";
@@ -22,7 +23,9 @@ const shellInputSchema = z.object({
 		.string()
 		.min(1)
 		.max(10_000)
-		.describe("PowerShell command to execute under the active permission mode"),
+		.describe(
+			"PowerShell command to execute under the active permission mode; use Windows PowerShell 5.1-compatible syntax until a prior result identifies the selected engine",
+		),
 	timeout_ms: z
 		.number()
 		.int()
@@ -41,6 +44,7 @@ export type ShellOutput = {
 	timed_out: boolean;
 	stdout_truncated: boolean;
 	stderr_truncated: boolean;
+	shell: WindowsSandboxShell;
 	enforcement: {
 		filesystem: "write_restricted_acl" | "unrestricted";
 		process_tree: "job_members_kill_on_close";
@@ -53,7 +57,7 @@ export type ShellOutput = {
 export const shellTool: Tool<ShellInput, ShellOutput> = {
 	name: SHELL_TOOL_NAME,
 	description:
-		"Execute one non-interactive PowerShell command. The active permission mode selects either workspace-restricted filesystem access or explicit host-user filesystem/environment/network authority. In both modes, members assigned to the Windows Job are terminated on timeout or cancellation; brokered processes outside that Job are not covered.",
+		"Execute one non-interactive PowerShell command. PowerShell 7 (pwsh) is preferred, with an explicit fallback to Windows PowerShell 5.1 when unavailable. Selection happens before launch; a started command is never retried under another shell. Use Windows PowerShell 5.1-compatible syntax for the first command; every command result exposes the selected shell engine and compatibility version for subsequent commands. The active permission mode selects either workspace-restricted filesystem access or explicit host-user filesystem/environment/network authority. In both modes, members assigned to the Windows Job are terminated on timeout or cancellation; brokered processes outside that Job are not covered.",
 	inputSchema: shellInputSchema,
 	async getResourceAccesses(_input, context) {
 		const state = requireContext(context).getState();
@@ -110,6 +114,7 @@ export const shellTool: Tool<ShellInput, ShellOutput> = {
 			timed_out: result.timedOut,
 			stdout_truncated: result.stdoutTruncated,
 			stderr_truncated: result.stderrTruncated,
+			shell: result.shell,
 			enforcement: result.enforcement,
 			network_isolated: false,
 			network_notice: dangerFullAccess
