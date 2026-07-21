@@ -401,28 +401,14 @@ fn trusted_pwsh_executable_from(
 
     if let Some(search_path) = search_path {
         for directory in std::env::split_paths(search_path) {
-            let path_candidate = directory.join("pwsh.exe");
+            let candidate = directory.join("pwsh.exe");
             // PATH is caller-controlled and routinely contains unavailable or
-            // user-owned directories. Reject unrelated layouts without touching
-            // the filesystem; only plausible machine installs fail closed on
-            // probe errors other than NotFound.
-            if !has_supported_pwsh_layout(&path_candidate, program_files) {
+            // user-owned directories. Probe only absolute candidates with the
+            // exact PowerShell 7 suffix. Canonicalization below resolves short-path
+            // and casing aliases before the full trusted-root check.
+            if !candidate.is_absolute() || !has_supported_pwsh_suffix(&candidate) {
                 continue;
             }
-            let Some(version_directory) = path_candidate
-                .parent()
-                .and_then(|parent| parent.file_name())
-            else {
-                continue;
-            };
-            // Windows canonicalization may preserve caller-supplied casing. Rebase
-            // the validated suffix onto the canonical trust root so containment
-            // remains case-sensitive for NTFS directories without rejecting a PATH
-            // alias whose Program Files prefix uses different casing.
-            let candidate = program_files
-                .join("PowerShell")
-                .join(version_directory)
-                .join("pwsh.exe");
             if let Some(powershell) = trusted_powershell_candidate(
                 &candidate,
                 program_files,
@@ -496,6 +482,25 @@ fn has_supported_pwsh_layout(powershell: &Path, program_files: &Path) -> bool {
     }
 
     let suffix = &powershell_components[program_files_components.len()..];
+    has_supported_pwsh_suffix_components(suffix)
+}
+
+fn has_supported_pwsh_suffix(powershell: &Path) -> bool {
+    let components = powershell.components().collect::<Vec<_>>();
+    if components
+        .iter()
+        .any(|component| matches!(component, Component::ParentDir))
+        || components.len() < 3
+    {
+        return false;
+    }
+    has_supported_pwsh_suffix_components(&components[components.len() - 3..])
+}
+
+fn has_supported_pwsh_suffix_components(suffix: &[Component<'_>]) -> bool {
+    if suffix.len() != 3 {
+        return false;
+    }
     let Some(product_directory) = normal_component_name(suffix[0]) else {
         return false;
     };
