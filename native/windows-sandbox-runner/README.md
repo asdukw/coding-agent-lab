@@ -4,7 +4,7 @@
 
 ## 构建与安装
 
-前置条件：Windows 11 x64、`rustup`、`1.96.0-x86_64-pc-windows-msvc`，以及带 C++ x64 工具链的 Visual Studio 2022 Build Tools/Community。`bun run build:sandbox` 由系统 Windows PowerShell 5.1 驱动；PowerShell 7 是运行命令时的可选首选引擎，不是构建前置条件。仓库内的 `rust-toolchain.toml` 同时固定该版本及 `rustfmt`、`clippy` 组件。
+前置条件：Windows 11 x64、`rustup`、`1.96.0-x86_64-pc-windows-msvc`，以及带 C++ x64 工具链的 Visual Studio 2022 Build Tools/Community。`bun run build:sandbox` 由系统 Windows PowerShell 5.1 驱动；PowerShell 7 是运行命令时的推荐首选引擎，但不是构建前置条件。若 runner 只能回退到 Windows PowerShell 5.1，cagent 会在启动时打印兼容性警告和 PowerShell 7 升级指引。仓库内的 `rust-toolchain.toml` 同时固定该版本及 `rustfmt`、`clippy` 组件。
 
 在仓库根目录运行：
 

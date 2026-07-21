@@ -4,6 +4,14 @@ export const WINDOWS_SANDBOX_NETWORK_NOTICE =
 	"Network access is inherited from the host and is not isolated by the Windows sandbox.";
 export const WINDOWS_FULL_ACCESS_NOTICE =
 	"Full access runs PowerShell with the host user's filesystem, environment, and network authority; the Windows Job still bounds the process tree.";
+export const WINDOWS_POWERSHELL_UPGRADE_WARNING = [
+	"WARNING: PowerShell 7 (pwsh.exe) was not found in a trusted installation.",
+	"cagent is using the Windows PowerShell 5.1 compatibility fallback; modern PowerShell syntax may fail and cause avoidable command retries.",
+	"Install or update PowerShell 7 with:",
+	"  winget install --id Microsoft.PowerShell --source winget",
+	"  winget upgrade --id Microsoft.PowerShell --source winget",
+	"Then restart cagent so the trusted PowerShell 7 installation is detected.",
+].join("\n");
 
 export type WindowsSandboxExecutionMode =
 	| "workspace_write"
@@ -38,6 +46,12 @@ export type WindowsSandboxShell =
 			version: "5.1";
 			fallback: true;
 	  };
+
+export function getPowerShellUpgradeWarning(
+	shell: WindowsSandboxShell,
+): string | undefined {
+	return shell.fallback ? WINDOWS_POWERSHELL_UPGRADE_WARNING : undefined;
+}
 
 export type WindowsSandboxNativeRequest = {
 	version: typeof WINDOWS_SANDBOX_PROTOCOL_VERSION;

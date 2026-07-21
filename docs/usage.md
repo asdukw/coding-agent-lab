@@ -5,8 +5,17 @@
 ## 支持范围
 
 - Windows 11 x64 是主要运行与开发平台，内置 `Shell` 由 Rust / Win32 runner 执行。
+- 推荐安装 PowerShell 7。cagent 启动时优先解析受信任的 `pwsh.exe`；若只能使用系统 Windows PowerShell 5.1，会打印兼容性警告及升级指引，然后继续以 5.1 fallback 运行。
 - Ubuntu 可以运行控制面、离线 Demo 和单元测试，但不会注册内置 `Shell`。
 - 其他平台尚未作为支持目标验证。
+
+安装或更新 PowerShell 7 后，请重启 cagent：
+
+```powershell
+winget install --id Microsoft.PowerShell --source winget
+# 已安装旧版 PowerShell 7 时：
+winget upgrade --id Microsoft.PowerShell --source winget
+```
 
 ## Windows x64 发行版
 

@@ -5,7 +5,10 @@ import {
 	runMemoryCheckCommand,
 } from "./memoryDoctor";
 import { createModelClientFromEnv } from "./model";
-import { initializeWindowsSandbox } from "./sandbox";
+import {
+	getPowerShellUpgradeWarning,
+	initializeWindowsSandbox,
+} from "./sandbox";
 import { loadSession } from "./sessionStore";
 import { App } from "./ui/App";
 import { createAppLifecycle } from "./ui/appLifecycle";
@@ -46,7 +49,9 @@ Model environment:
 
 The release executable does not load workspace .env files. On Windows, keep
 cagent.exe and cagent-windows-sandbox-runner.exe together outside the writable
-workspace, then run cagent from the workspace you want to edit.`;
+workspace, then run cagent from the workspace you want to edit. PowerShell 7
+is preferred; cagent warns and provides upgrade guidance when it falls back to
+Windows PowerShell 5.1.`;
 
 export function parseCliArgs(args: string[]): CliArgs {
 	const taskParts: string[] = [];
@@ -133,7 +138,17 @@ export async function runCli(
 		return runMemoryCheckCommand({ cwd });
 	}
 	if (process.platform === "win32") {
-		await initializeWindowsSandbox(cwd);
+		const sandbox = await initializeWindowsSandbox(cwd);
+		const preflight = await sandbox.runPowerShell({
+			command: "$null = $PSVersionTable.PSVersion",
+			cwd,
+			executionMode: "workspace_write",
+			timeoutMs: 10_000,
+		});
+		const warning = getPowerShellUpgradeWarning(preflight.shell);
+		if (warning) {
+			process.stderr.write(`${warning}\n`);
+		}
 	}
 	const initialState = resumeId ? await loadSession(cwd, resumeId) : undefined;
 	const model = createModelClientFromEnv();

@@ -8,7 +8,11 @@ import {
 	getMemoryDir,
 	MAX_MEMORY_TOPIC_BYTES,
 } from "../src/memory";
-import { WindowsSandboxError } from "../src/sandbox";
+import {
+	getPowerShellUpgradeWarning,
+	WINDOWS_POWERSHELL_UPGRADE_WARNING,
+	WindowsSandboxError,
+} from "../src/sandbox";
 import { createInitialState } from "../src/state";
 import { BUILTIN_TOOLS } from "../src/tools";
 import { editTool } from "../src/tools/editTool";
@@ -26,6 +30,26 @@ import { writeTool } from "../src/tools/writeTool";
 async function makeTempDir(): Promise<string> {
 	return mkdtemp(join(tmpdir(), "cagent-tools-"));
 }
+
+test("PowerShell compatibility warning guides fallback users to PowerShell 7", () => {
+	expect(
+		getPowerShellUpgradeWarning({
+			engine: "pwsh",
+			version: "7",
+			fallback: false,
+		}),
+	).toBeUndefined();
+	expect(
+		getPowerShellUpgradeWarning({
+			engine: "windows_powershell",
+			version: "5.1",
+			fallback: true,
+		}),
+	).toBe(WINDOWS_POWERSHELL_UPGRADE_WARNING);
+	expect(WINDOWS_POWERSHELL_UPGRADE_WARNING).toContain("winget install");
+	expect(WINDOWS_POWERSHELL_UPGRADE_WARNING).toContain("winget upgrade");
+	expect(WINDOWS_POWERSHELL_UPGRADE_WARNING).toContain("restart cagent");
+});
 
 test("tool failures distinguish backend and command failures", async () => {
 	const backend = classifyToolFailure(
