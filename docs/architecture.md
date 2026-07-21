@@ -45,7 +45,7 @@ Coding Agent Lab 通过独立实现控制面，研究不可信模型输出如何
 - 完整快照先写同目录临时文件，再替换目标；恢复只容忍文件末尾未完成的一条 JSON，中间损坏或语义不一致会失败。
 - Sub-agent 由 [`src/agents/manager.ts`](../src/agents/manager.ts) 管理，并通过 [`src/agents/mailbox.ts`](../src/agents/mailbox.ts) 与父 Agent 通知协作。
 - 工具资源由 [`src/tools/resourceLock.ts`](../src/tools/resourceLock.ts) 协调，持锁后仍需对关键路径身份重新校验。
-- Memory mutation 另通过 SQLite `BEGIN IMMEDIATE` 协调多个 cagent 进程；Memory Edit 的读取、校验、写入和索引刷新共享一个锁边界，并在提交前验证文件版本。
+- Memory mutation 另通过 SQLite `BEGIN IMMEDIATE` 协调多个 cagent 进程；取得事务后用 `PRAGMA quick_check` 验证锁库，损坏时 fail-closed。Memory Edit 的读取、校验、写入和索引刷新共享一个锁边界，并在提交前验证文件版本。
 
 持久化选择及故障语义见 [ADR 0002](adr/0002-jsonl-session-recovery-semantics.md)。
 Memory 的本地文件系统攻击者范围与残余 TOCTOU 风险见 [ADR 0003](adr/0003-memory-filesystem-threat-model.md)。

@@ -12,7 +12,7 @@
 当前版本采用以下边界：
 
 1. 模型输出、项目指令和工具参数不可信；所有 Memory 目标必须经过 workspace 包含性、规范路径、symlink/junction 和 hardlink 检查。
-2. 多个正常运行的 cagent 进程属于协作方；它们通过 SQLite `BEGIN IMMEDIATE` 串行化 Memory mutation。
+2. 多个正常运行的 cagent 进程属于协作方；它们通过 SQLite `BEGIN IMMEDIATE` 串行化 Memory mutation，并在取得事务后以 `PRAGMA quick_check` 验证锁库，损坏时 fail-closed。
 3. Memory Edit 的读取、精确替换、frontmatter/去重校验、原子写入和索引刷新必须处于同一 mutation lock 内，并在提交前比较文件 device、inode、size、mtime 与内容快照。
 4. 同一宿主用户控制的恶意进程若在路径校验后持续执行 rename、junction 替换或句柄级竞争，属于当前版本明确不抵御的攻击者。
 5. 若未来需要扩大到第 4 类攻击者，必须引入基于目录/文件句柄的原生实现：Unix 使用 `openat`/`O_NOFOLLOW`，Windows 使用受约束的目录句柄和不允许 delete-share 的目标句柄；不能继续叠加路径字符串检查并宣称已经消除竞态。

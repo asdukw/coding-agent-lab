@@ -1300,6 +1300,7 @@ async function acquireMemoryMutationFileLock(
 	});
 	const database = new Database(lockPath, { create: true, strict: true });
 	const startedAt = Date.now();
+	let transactionStarted = false;
 
 	try {
 		database.exec("PRAGMA busy_timeout = 0");
@@ -1313,6 +1314,7 @@ async function acquireMemoryMutationFileLock(
 		for (;;) {
 			try {
 				database.exec("BEGIN IMMEDIATE");
+				transactionStarted = true;
 				break;
 			} catch (caught) {
 				if (!isSqliteBusy(caught)) {
@@ -1326,6 +1328,7 @@ async function acquireMemoryMutationFileLock(
 				await delay(25 + Math.floor(Math.random() * 25));
 			}
 		}
+		assertMemoryMutationDatabaseIntegrity(database, lockPath);
 
 		return async () => {
 			try {
@@ -1342,8 +1345,39 @@ async function acquireMemoryMutationFileLock(
 			}
 		};
 	} catch (caught) {
+		if (transactionStarted) {
+			try {
+				database.exec("ROLLBACK");
+			} catch {
+				// Preserve the original acquisition or integrity error.
+			}
+		}
 		database.close();
 		throw caught;
+	}
+}
+
+function assertMemoryMutationDatabaseIntegrity(
+	database: Database,
+	lockPath: string,
+): void {
+	let rows: { quick_check: string }[];
+	try {
+		rows = database
+			.query<{ quick_check: string }, []>("PRAGMA quick_check")
+			.all();
+	} catch (caught) {
+		throw new Error(
+			`Memory mutation database failed integrity check: ${lockPath}: ${formatCaught(caught)}`,
+			{ cause: caught },
+		);
+	}
+	if (rows.length !== 1 || rows[0]?.quick_check !== "ok") {
+		const details =
+			rows.map((row) => row.quick_check).join("; ") || "no result";
+		throw new Error(
+			`Memory mutation database failed integrity check: ${lockPath}: ${details}`,
+		);
 	}
 }
 
