@@ -1,4 +1,4 @@
-# ADR 0002：Auto 模式采用 sandbox-first 授权
+# ADR 0004：Auto 模式采用 sandbox-first 授权
 
 ## 状态
 

@@ -40,6 +40,8 @@ Coding Agent Lab 通过独立实现控制面，研究不可信模型输出如何
 
 `auto` 使用 sandbox-first 权限流：普通 Shell 调用先在 `workspace_write` 边界内执行，不产生工具审批；如果模型根据失败结果判断命令确实需要边界外权限，必须以 `dangerously_disable_sandbox: true` 发起新的 Shell 调用，该调用在启动前进入正常审批流。审批不会触发控制面自动重放，避免已经在 sandbox 内产生部分副作用的命令被隐式执行第二次；即使用户曾对 Shell 选择“本会话不再询问”，显式 sandbox bypass 仍必须重新审批。外部 MCP 副作用不受本地 sandbox 约束，因此继续在执行前审批。
 
+该授权取舍见 [ADR 0004](adr/0004-sandbox-first-auto-mode.md)。
+
 当前 Win32 runner 的 `workspace_write` 只强制工作区写边界和进程树生命周期，宿主读取与网络仍未隔离；UI、工具结果与文档必须持续披露这一限制。`auto` 的这一阶段首先对齐“sandbox 内默认允许、显式越界再审批”的控制流，不能宣称已经达到同时隔离文件读取与网络的完整恶意代码 containment。
 
 ## 状态、并发与恢复
