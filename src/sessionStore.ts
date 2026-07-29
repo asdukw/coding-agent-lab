@@ -25,6 +25,12 @@ import {
 	type ToolResultMetadata,
 } from "./state";
 import {
+	createEmptyTaskGraph,
+	normalizeTaskGraph,
+	parseTaskGraph,
+	type TaskGraphState,
+} from "./tasks";
+import {
 	deriveToolExecutions,
 	parseToolArguments,
 	recordToolCall,
@@ -57,6 +63,7 @@ export type StoredSessionState = {
 	cwd: string;
 	toolPermissionContext?: ToolPermissionContext;
 	plan?: RuntimePlan;
+	taskGraph?: TaskGraphState;
 	messages: Message[];
 	toolExecutions?: ToolExecution[];
 	changedFiles?: string[];
@@ -126,6 +133,7 @@ export type SessionEvent =
 				task: string;
 				toolPermissionContext: ToolPermissionContext;
 				plan: RuntimePlan;
+				taskGraph?: TaskGraphState;
 				turn: number;
 				budget: BudgetState;
 				compaction: CompactionState;
@@ -261,6 +269,7 @@ export async function appendSessionState(
 					state.toolPermissionContext,
 				),
 				plan: state.plan,
+				taskGraph: state.taskGraph,
 				turn: state.turn,
 				budget: state.budget,
 				compaction: state.compaction,
@@ -400,6 +409,7 @@ export async function saveSession(
 						state.toolPermissionContext,
 					),
 					plan: state.plan,
+					taskGraph: state.taskGraph,
 					turn: state.turn,
 					budget: state.budget,
 					compaction: state.compaction,
@@ -676,6 +686,7 @@ function replaySessionEvents(
 		messages: [],
 		toolExecutions: [],
 		changedFiles: [],
+		taskGraph: createEmptyTaskGraph(),
 		turn: 0,
 		budget: { turnsUsed: 0, maxTurns: 20 },
 	};
@@ -925,7 +936,7 @@ function validateStateSnapshotPayload(payload: Record<string, unknown>): void {
 	assertSessionKeys(
 		payload,
 		["task", "toolPermissionContext", "plan", "turn", "budget", "compaction"],
-		["toolExecutions", "changedFiles"],
+		["toolExecutions", "changedFiles", "taskGraph"],
 		label,
 	);
 	requireSessionString(payload, "task", label);
@@ -939,6 +950,9 @@ function validateStateSnapshotPayload(payload: Record<string, unknown>): void {
 	}
 	if (payload.changedFiles !== undefined) {
 		validateStringArray(payload.changedFiles, `${label} changedFiles`);
+	}
+	if (payload.taskGraph !== undefined) {
+		parseTaskGraph(payload.taskGraph);
 	}
 }
 
@@ -1465,6 +1479,7 @@ function applyCurrentSessionEvent(
 			task: event.payload.task,
 			toolPermissionContext: event.payload.toolPermissionContext,
 			plan: event.payload.plan,
+			taskGraph: event.payload.taskGraph ?? state.taskGraph,
 			turn: event.payload.turn,
 			budget: event.payload.budget,
 			compaction: event.payload.compaction,
@@ -1554,6 +1569,7 @@ function fromStoredSessionState(
 			cwd,
 		),
 		plan: normalizeRestoredPlan(state.plan),
+		taskGraph: normalizeTaskGraph(state.taskGraph),
 		messages,
 		todos: [],
 		observations: [],

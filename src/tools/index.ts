@@ -16,6 +16,14 @@ import {
 } from "./planTools";
 import { readTool } from "./readTool";
 import { shellTool } from "./shellTool";
+import {
+	TASK_TOOLS,
+	taskClaimTool,
+	taskCreateTool,
+	taskGetTool,
+	taskListTool,
+	taskUpdateTool,
+} from "./taskTools";
 import type { Tools } from "./types";
 import { writeTool } from "./writeTool";
 
@@ -31,6 +39,7 @@ export const BUILTIN_TOOLS: Tools = [
 	enterPlanModeTool,
 	updatePlanTool,
 	exitPlanModeTool,
+	...TASK_TOOLS,
 	...AGENT_TOOLS,
 ];
 
@@ -46,6 +55,11 @@ export {
 	sendAgentMessageTool,
 	shellTool,
 	spawnSubagentTool,
+	taskClaimTool,
+	taskCreateTool,
+	taskGetTool,
+	taskListTool,
+	taskUpdateTool,
 	updatePlanTool,
 	waitAgentTool,
 	writeTool,
