@@ -65,6 +65,10 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Install ripgrep on Linux
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes ripgrep
+
       - name: Run offline tests
         run: bun run test:unit
 
