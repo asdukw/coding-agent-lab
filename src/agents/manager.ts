@@ -1,6 +1,16 @@
 import { randomUUID } from "node:crypto";
 import type { ModelClient } from "../model/client";
+import { Scheduler, type SchedulerEvent } from "../scheduler";
 import type { AgentState, Message } from "../state";
+import {
+	PersistentTaskStore,
+	type Task,
+	type TaskActor,
+	type TaskDraft,
+	type TaskStatus,
+	type TaskUpdateOutcome,
+	type TaskUpdateRequest,
+} from "../tasks";
 import type { Tools } from "../tools/types";
 import { AgentMailbox, type AgentMessage } from "./mailbox";
 import { runSubagent } from "./runAgent";
@@ -17,13 +27,20 @@ import type {
 import { AGENT_COORDINATION_PREFIX } from "./types";
 
 const DEFAULT_MAX_CONCURRENT_AGENTS = 4;
+const DEFAULT_MAX_SCHEDULED_AGENTS = 3;
 const DEFAULT_MAX_DEPTH = 1;
 const DEFAULT_MAX_TURNS = 12;
 const MAX_WAIT_TIMEOUT_MS = 10 * 60_000;
+const HEARTBEAT_INTERVAL_MS = 5_000;
 
 type RunningAgent = {
 	controller: AbortController;
 	completion: Promise<AgentResult>;
+};
+
+type ScheduledBinding = {
+	taskId: string;
+	runId: string;
 };
 
 export class InProcessAgentManager implements AgentRuntime {
@@ -35,15 +52,71 @@ export class InProcessAgentManager implements AgentRuntime {
 	private readonly memoryQueued = new Set<string>();
 	private readonly pendingMemory = new Map<string, AgentMemoryUpdate>();
 	private readonly quiescingSessions = new Set<string>();
+	private readonly taskStores = new Map<string, PersistentTaskStore>();
+	private readonly schedulers = new Map<string, Scheduler>();
 	private readonly slots: AgentSlotPool;
 	private closed = false;
 	private shutdownPromise?: Promise<void>;
+
+	readonly tasks = {
+		create: async (
+			requesterState: AgentState,
+			drafts: readonly TaskDraft[],
+		) => {
+			if (requesterState.agent.depth !== 0) {
+				throw new Error("only the main agent can create shared tasks");
+			}
+			const { store } = this.coordinationFor(requesterState);
+			return store.createBatch(drafts);
+		},
+		get: async (requesterState: AgentState, taskId: string) => {
+			const { store } = this.coordinationFor(requesterState);
+			const task = await store.get(taskId);
+			this.assertTaskVisibleTo(requesterState, task);
+			return task;
+		},
+		list: async (
+			requesterState: AgentState,
+			filter: {
+				readyOnly?: boolean;
+				status?: readonly TaskStatus[];
+				unownedOnly?: boolean;
+			} = {},
+		) => {
+			if (requesterState.agent.depth !== 0) {
+				throw new Error("only the main agent can list the shared task graph");
+			}
+			const { store } = this.coordinationFor(requesterState);
+			return store.list(filter);
+		},
+		update: async (
+			requesterState: AgentState,
+			request: TaskUpdateRequest,
+		): Promise<TaskUpdateOutcome> => {
+			const { store, scheduler } = this.coordinationFor(requesterState);
+			const actor = this.taskActor(requesterState);
+			if (request.action === "cancel") {
+				if (!actor.isRoot) {
+					throw new Error("only the main agent can cancel tasks");
+				}
+				return scheduler.cancelTask(
+					request.taskId,
+					request.expectedVersion,
+					request.idempotencyKey,
+					request.reason ?? "cancelled by main agent",
+					request.cascade ?? true,
+				);
+			}
+			return store.update(request, actor);
+		},
+	};
 
 	constructor(
 		private readonly options: {
 			model: ModelClient;
 			getTools(): Tools;
 			maxConcurrentAgents?: number;
+			maxScheduledAgents?: number;
 			maxDepth?: number;
 			defaultMaxTurns?: number;
 		},
@@ -54,6 +127,12 @@ export class InProcessAgentManager implements AgentRuntime {
 				DEFAULT_MAX_CONCURRENT_AGENTS,
 			),
 		);
+	}
+
+	attach(state: AgentState): void {
+		if (state.agent.depth === 0) {
+			this.coordinationFor(state);
+		}
 	}
 
 	async spawn(
@@ -78,50 +157,25 @@ export class InProcessAgentManager implements AgentRuntime {
 			}
 		}
 
-		const id = randomUUID();
 		const rootSessionId = this.rootSessionId(parentState);
 		if (this.quiescingSessions.has(rootSessionId)) {
 			throw new Error(
 				"sub-agent spawning is paused during a permission policy change",
 			);
 		}
-		const agentType = request.agentType ?? "general-purpose";
-		const record: AgentRecord = {
-			id,
-			parentId: parent.id,
-			sessionId: rootSessionId,
-			childSessionId: `${rootSessionId}.agent.${id}`,
-			name: request.name,
-			description:
-				request.description?.trim() || request.task.trim().slice(0, 80),
-			task: request.task.trim(),
-			agentType,
-			depth: parent.depth + 1,
-			background: request.runInBackground === true,
-			status: "created",
-			createdAt: new Date().toISOString(),
-		};
-		this.records.set(id, record);
-		this.emitStatus(record);
-
-		const controller = new AbortController();
-		const completion = this.runRecord(record, parentState, request, controller);
-		this.running.set(id, { controller, completion });
-		void completion.finally(() => {
-			this.running.delete(id);
-		});
+		const { record, completion } = this.launchAgent(parentState, request);
 
 		if (record.background) {
 			return {
 				status: "background",
-				agentId: id,
+				agentId: record.id,
 				description: record.description,
 			};
 		}
 
 		return {
 			status: "completed",
-			agentId: id,
+			agentId: record.id,
 			result: await completion,
 		};
 	}
@@ -238,7 +292,17 @@ export class InProcessAgentManager implements AgentRuntime {
 		if (isTerminal(record.status) || record.status === "cancelling") {
 			return false;
 		}
+		if (record.taskId && record.runId) {
+			const store = this.taskStores.get(record.sessionId);
+			await store?.releaseSpawnFailure({
+				taskId: record.taskId,
+				agentId: record.id,
+				runId: record.runId,
+				error: reason,
+			});
+		}
 		this.requestCancellation(record, reason);
+		this.schedulers.get(record.sessionId)?.requestSchedule();
 		return true;
 	}
 
@@ -325,6 +389,11 @@ export class InProcessAgentManager implements AgentRuntime {
 	}
 
 	private async performShutdown(): Promise<void> {
+		await Promise.allSettled(
+			[...this.schedulers.values()].map((scheduler) =>
+				scheduler.shutdown("agent runtime shutdown"),
+			),
+		);
 		for (const record of this.records.values()) {
 			if (!isTerminal(record.status) && record.status !== "cancelling") {
 				this.requestCancellation(record, "agent runtime shutdown");
@@ -334,7 +403,202 @@ export class InProcessAgentManager implements AgentRuntime {
 			[...this.running.values()].map((running) => running.completion),
 		);
 		this.mailbox.close();
+		this.schedulers.clear();
+		this.taskStores.clear();
 		this.listeners.clear();
+	}
+
+	private launchAgent(
+		parentState: AgentState,
+		request: SpawnAgentRequest,
+		options: {
+			id?: string;
+			binding?: ScheduledBinding;
+		} = {},
+	): { record: AgentRecord; completion: Promise<AgentResult> } {
+		this.assertOpen();
+		const id = options.id ?? randomUUID();
+		if (this.records.has(id)) {
+			throw new Error(`agent ID is already registered: ${id}`);
+		}
+		const rootSessionId = this.rootSessionId(parentState);
+		if (this.quiescingSessions.has(rootSessionId)) {
+			throw new Error(
+				"sub-agent spawning is paused during a permission policy change",
+			);
+		}
+		const now = new Date().toISOString();
+		const record: AgentRecord = {
+			id,
+			parentId: parentState.agent.id,
+			sessionId: rootSessionId,
+			childSessionId: `${rootSessionId}.agent.${id}`,
+			name: request.name,
+			description:
+				request.description?.trim() || request.task.trim().slice(0, 80),
+			task: request.task.trim(),
+			agentType: request.agentType ?? "general-purpose",
+			depth: parentState.agent.depth + 1,
+			background: request.runInBackground === true,
+			status: "created",
+			taskId: options.binding?.taskId,
+			runId: options.binding?.runId,
+			createdAt: now,
+			lastHeartbeatAt: now,
+		};
+		this.records.set(id, record);
+		this.emitStatus(record);
+
+		const controller = new AbortController();
+		const completion = this.runRecord(record, parentState, request, controller);
+		this.running.set(id, { controller, completion });
+		void completion.finally(() => {
+			this.running.delete(id);
+		});
+		return { record, completion };
+	}
+
+	private coordinationFor(state: AgentState): {
+		store: PersistentTaskStore;
+		scheduler: Scheduler;
+	} {
+		const sessionId = this.rootSessionId(state);
+		let store = this.taskStores.get(sessionId);
+		if (!store) {
+			store = new PersistentTaskStore(state.cwd, sessionId);
+			this.taskStores.set(sessionId, store);
+		}
+		let scheduler = this.schedulers.get(sessionId);
+		if (!scheduler) {
+			scheduler = new Scheduler({
+				store,
+				maxConcurrency: positiveInteger(
+					this.options.maxScheduledAgents,
+					DEFAULT_MAX_SCHEDULED_AGENTS,
+				),
+				runningCount: () =>
+					[...this.records.values()].filter(
+						(record) =>
+							record.sessionId === sessionId && !isTerminal(record.status),
+					).length,
+				startAgent: (input) => {
+					this.startScheduledAgent(input, scheduler as Scheduler);
+				},
+				cancelAgent: (agentId, reason) => {
+					const record = this.records.get(agentId);
+					if (
+						record &&
+						record.sessionId === sessionId &&
+						!isTerminal(record.status) &&
+						record.status !== "cancelling"
+					) {
+						this.requestCancellation(record, reason);
+					}
+				},
+			});
+			const rootAgentId = this.rootAgentId(state);
+			scheduler.subscribe((event) =>
+				this.notifySchedulerEvent(rootAgentId, event),
+			);
+			this.schedulers.set(sessionId, scheduler);
+		}
+		if (state.agent.depth === 0) {
+			scheduler.attachParentState(state);
+		}
+		return { store, scheduler };
+	}
+
+	private startScheduledAgent(
+		input: {
+			parentState: AgentState;
+			task: Task;
+			agentId: string;
+			runId: string;
+		},
+		scheduler: Scheduler,
+	): void {
+		const request: SpawnAgentRequest = {
+			task: buildScheduledTaskPrompt(input.task),
+			description: input.task.subject,
+			name: input.task.id,
+			agentType: "general-purpose",
+			runInBackground: true,
+			contextMode: "task-only",
+		};
+		const { completion } = this.launchAgent(input.parentState, request, {
+			id: input.agentId,
+			binding: { taskId: input.task.id, runId: input.runId },
+		});
+		void completion
+			.then(async (result) => {
+				const applied = await scheduler.handleAgentResult({
+					agentId: input.agentId,
+					runId: input.runId,
+					taskId: input.task.id,
+					result,
+				});
+				if (applied) {
+					this.queueParentMemory(input.agentId, result);
+					this.notifyParent(input.agentId, result);
+				}
+			})
+			.catch((caught) => {
+				this.notifySchedulerEvent(this.rootAgentId(input.parentState), {
+					type: "scheduler_error",
+					error: formatCaught(caught),
+				});
+			});
+	}
+
+	private notifySchedulerEvent(
+		rootAgentId: string,
+		event: SchedulerEvent,
+	): void {
+		const message =
+			event.type === "scheduler_stalled"
+				? `<scheduler-stalled>\nNo runnable tasks remain.\nBlocked tasks: ${event.blockedTaskIds.join(", ")}\nGraph validation: ${JSON.stringify(event.validation)}\n</scheduler-stalled>`
+				: `<scheduler-error>${event.error}</scheduler-error>`;
+		this.mailbox.send({
+			type: "message",
+			id: randomUUID(),
+			from: "scheduler",
+			to: rootAgentId,
+			content: message,
+		});
+		this.emit({
+			type: event.type,
+			agentId: "scheduler",
+			recipientId: rootAgentId,
+			message,
+		});
+		this.emit({
+			type: "inbox",
+			agentId: "scheduler",
+			recipientId: rootAgentId,
+		});
+	}
+
+	private taskActor(state: AgentState): TaskActor {
+		if (state.agent.depth === 0) {
+			return { agentId: state.agent.id, isRoot: true };
+		}
+		const record = this.records.get(state.agent.id);
+		return {
+			agentId: state.agent.id,
+			taskId: record?.taskId,
+			runId: record?.runId,
+			isRoot: false,
+		};
+	}
+
+	private assertTaskVisibleTo(state: AgentState, task: Task | undefined): void {
+		if (!task || state.agent.depth === 0) {
+			return;
+		}
+		const record = this.records.get(state.agent.id);
+		if (record?.taskId !== task.id) {
+			throw new Error(`agent ${state.agent.id} cannot inspect task ${task.id}`);
+		}
 	}
 
 	private async runRecord(
@@ -344,6 +608,7 @@ export class InProcessAgentManager implements AgentRuntime {
 		controller: AbortController,
 	): Promise<AgentResult> {
 		let releaseSlot: (() => void) | undefined;
+		let heartbeat: ReturnType<typeof setInterval> | undefined;
 		try {
 			releaseSlot = await this.slots.acquire(controller.signal);
 			const beforeStart = this.records.get(record.id);
@@ -356,10 +621,21 @@ export class InProcessAgentManager implements AgentRuntime {
 					cancelledResult(record.id, beforeStart.error ?? "cancelled"),
 				);
 			}
+			const startedAt = new Date().toISOString();
 			this.updateRecord(record.id, {
 				status: "running",
-				startedAt: new Date().toISOString(),
+				startedAt,
+				lastHeartbeatAt: startedAt,
 			});
+			heartbeat = setInterval(() => {
+				const current = this.records.get(record.id);
+				if (current && !isTerminal(current.status)) {
+					this.updateRecord(record.id, {
+						lastHeartbeatAt: new Date().toISOString(),
+					});
+				}
+			}, HEARTBEAT_INTERVAL_MS);
+			heartbeat.unref?.();
 
 			const result = await runSubagent({
 				identity: {
@@ -405,6 +681,9 @@ export class InProcessAgentManager implements AgentRuntime {
 					};
 			return this.finishRecord(record.id, result);
 		} finally {
+			if (heartbeat) {
+				clearInterval(heartbeat);
+			}
 			releaseSlot?.();
 		}
 	}
@@ -430,10 +709,13 @@ export class InProcessAgentManager implements AgentRuntime {
 			result: finalResult,
 			error: finalResult.error,
 			completedAt: new Date().toISOString(),
+			lastHeartbeatAt: new Date().toISOString(),
 		});
 		this.mailbox.drain(agentId);
-		this.queueParentMemory(agentId, finalResult);
-		this.notifyParent(agentId, finalResult);
+		if (!record.taskId) {
+			this.queueParentMemory(agentId, finalResult);
+			this.notifyParent(agentId, finalResult);
+		}
 		return finalResult;
 	}
 
@@ -675,6 +957,20 @@ function coordinationMessage(payload: Record<string, unknown>): Message {
 		role: "agent",
 		content: `${AGENT_COORDINATION_PREFIX}${JSON.stringify(payload)}`,
 	};
+}
+
+function buildScheduledTaskPrompt(task: Task): string {
+	return [
+		`You are assigned persistent task ${task.id}.`,
+		`Subject: ${task.subject}`,
+		task.description ? `Description:\n${task.description}` : "",
+		`Run ID: ${task.activeRunId ?? "unbound"}`,
+		"",
+		"Work only on this task. Use TaskGet to inspect current task metadata and TaskUpdate(action=progress) for material progress updates.",
+		"Do not mark the task completed or failed yourself. Return a concise final result with summary, changed files, verification evidence, and remaining risks; the host runtime is the final task-state authority.",
+	]
+		.filter(Boolean)
+		.join("\n");
 }
 
 function cloneRecord(record: AgentRecord): AgentRecord {

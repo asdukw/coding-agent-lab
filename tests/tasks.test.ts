@@ -1,15 +1,27 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
-	claimTask,
+	collectDescendants,
 	createEmptyTaskGraph,
 	createTaskGraphBatch,
-	recoverExpiredLeases,
-	updateTaskGraph,
+	PersistentTaskStore,
 	validateTaskGraph,
 } from "../src/tasks";
 
+const temporaryDirectories: string[] = [];
+
+afterEach(async () => {
+	await Promise.all(
+		temporaryDirectories
+			.splice(0)
+			.map((path) => rm(path, { recursive: true, force: true })),
+	);
+});
+
 describe("task graph", () => {
-	test("creates a valid DAG atomically", () => {
+	test("creates a valid DAG with consistent forward and reverse edges", () => {
 		const result = createTaskGraphBatch(createEmptyTaskGraph(), [
 			{ clientId: "analyze", subject: "Analyze", blockedBy: [] },
 			{
@@ -18,18 +30,19 @@ describe("task graph", () => {
 				blockedBy: ["analyze"],
 			},
 		]);
-
-		const analyzeTask = result.tasks[0];
-		if (!analyzeTask) {
-			throw new Error("expected the analyze task to be created");
+		const analyze = result.tasks[0];
+		const implement = result.tasks[1];
+		if (!analyze || !implement) {
+			throw new Error("expected both tasks");
 		}
-		expect(result.tasks[1]?.blockedBy).toEqual([analyzeTask.id]);
+
+		expect(implement.blockedBy).toEqual([analyze.id]);
+		expect(analyze.blocks).toEqual([implement.id]);
 		expect(validateTaskGraph(result.graph)).toEqual({ valid: true });
 	});
 
-	test("rejects a cycle in a batch without mutating the original graph", () => {
+	test("rejects cyclic creation without mutating the source graph", () => {
 		const original = createEmptyTaskGraph();
-
 		expect(() =>
 			createTaskGraphBatch(original, [
 				{ clientId: "a", subject: "A", blockedBy: ["b"] },
@@ -39,82 +52,134 @@ describe("task graph", () => {
 		expect(original).toEqual(createEmptyTaskGraph());
 	});
 
-	test("rejects an incremental dependency cycle", () => {
-		const initial = createTaskGraphBatch(createEmptyTaskGraph(), [
-			{ clientId: "a", subject: "A", blockedBy: [] },
-			{ clientId: "b", subject: "B", blockedBy: ["a"] },
+	test("collects descendants without walking upward to blockers", () => {
+		const result = createTaskGraphBatch(createEmptyTaskGraph(), [
+			{ clientId: "root", subject: "Root", blockedBy: [] },
+			{ clientId: "child", subject: "Child", blockedBy: ["root"] },
+			{ clientId: "leaf", subject: "Leaf", blockedBy: ["child"] },
 		]);
-		const [a] = initial.tasks;
+		const root = result.tasks[0];
+		const child = result.tasks[1];
+		const leaf = result.tasks[2];
+		if (!root || !child || !leaf) {
+			throw new Error("expected root, child, and leaf tasks");
+		}
 
-		expect(() =>
-			updateTaskGraph(initial.graph, {
-				taskId: a?.id ?? "",
-				action: "add_dependencies",
-				blockedBy: [initial.tasks[1]?.id ?? ""],
-				expectedVersion: a?.version ?? 0,
-				idempotencyKey: "cycle-attempt",
-			}),
-		).toThrow("dependency_cycle");
-		expect(validateTaskGraph(initial.graph)).toEqual({ valid: true });
-	});
-
-	test("enforces readiness, lease ownership, version, and idempotency", () => {
-		const initial = createTaskGraphBatch(createEmptyTaskGraph(), [
-			{ clientId: "a", subject: "A", blockedBy: [] },
-			{ clientId: "b", subject: "B", blockedBy: ["a"] },
+		expect(collectDescendants(root.id, result.graph.tasks)).toEqual([
+			child.id,
+			leaf.id,
 		]);
-		const [a, b] = initial.tasks;
-		expect(() =>
-			claimTask(initial.graph, b?.id ?? "", "worker", 60_000),
-		).toThrow("blocked by");
-
-		const claimed = claimTask(initial.graph, a?.id ?? "", "worker", 60_000);
-		const completed = updateTaskGraph(claimed.graph, {
-			taskId: claimed.task.id,
-			action: "complete",
-			expectedVersion: claimed.task.version,
-			idempotencyKey: "complete-a",
-			agentId: "worker",
-			leaseToken: claimed.task.lease?.token,
-			result: { summary: "done" },
-		});
-		const replay = updateTaskGraph(completed.graph, {
-			taskId: claimed.task.id,
-			action: "complete",
-			expectedVersion: claimed.task.version,
-			idempotencyKey: "complete-a",
-			agentId: "worker",
-			leaseToken: claimed.task.lease?.token,
-		});
-
-		expect(replay.idempotentReplay).toBe(true);
-		expect(
-			claimTask(completed.graph, b?.id ?? "", "worker-2", 60_000).task.status,
-		).toBe("running");
-	});
-
-	test("recovers an expired lease for deterministic rescheduling", () => {
-		const initial = createTaskGraphBatch(createEmptyTaskGraph(), [
-			{ clientId: "work", subject: "Work", blockedBy: [] },
-		]);
-		const now = new Date("2026-07-30T00:00:00.000Z");
-		const claimed = claimTask(
-			initial.graph,
-			initial.tasks[0]?.id ?? "",
-			"lost-agent",
-			1_000,
-			now,
-		);
-		const recovered = recoverExpiredLeases(
-			claimed.graph,
-			new Date(now.getTime() + 1_001),
-		);
-
-		expect(recovered.recoveredTaskIds).toEqual([claimed.task.id]);
-		expect(recovered.graph.tasks[claimed.task.id]?.status).toBe("pending");
-		expect(recovered.graph.tasks[claimed.task.id]?.owner).toBeUndefined();
-		expect(recovered.graph.tasks[claimed.task.id]?.version).toBe(
-			claimed.task.version + 1,
+		expect(collectDescendants(child.id, result.graph.tasks)).not.toContain(
+			root.id,
 		);
 	});
 });
+
+describe("persistent task store", () => {
+	test("atomically reserves a ready task and rejects a second owner", async () => {
+		const store = await createStore();
+		const [task] = await store.createBatch([
+			{ clientId: "work", subject: "Work", blockedBy: [] },
+		]);
+		if (!task) {
+			throw new Error("expected a task");
+		}
+		const first = await store.reserve({
+			taskId: task.id,
+			agentId: "agent-a",
+			runId: "00000000-0000-4000-8000-000000000001",
+		});
+		const second = await store.reserve({
+			taskId: task.id,
+			agentId: "agent-b",
+			runId: "00000000-0000-4000-8000-000000000002",
+		});
+
+		expect(first?.ownerAgentId).toBe("agent-a");
+		expect(second).toBeUndefined();
+	});
+
+	test("rejects a late result after run ownership changes", async () => {
+		const store = await createStore();
+		const [task] = await store.createBatch([
+			{ clientId: "work", subject: "Work", blockedBy: [], maxAttempts: 2 },
+		]);
+		if (!task) {
+			throw new Error("expected a task");
+		}
+		const oldRunId = "00000000-0000-4000-8000-000000000001";
+		await store.reserve({
+			taskId: task.id,
+			agentId: "old-agent",
+			runId: oldRunId,
+		});
+		await store.releaseSpawnFailure({
+			taskId: task.id,
+			agentId: "old-agent",
+			runId: oldRunId,
+			error: "lost",
+		});
+		await store.reserve({
+			taskId: task.id,
+			agentId: "new-agent",
+			runId: "00000000-0000-4000-8000-000000000002",
+		});
+
+		const late = await store.settleAgentRun({
+			taskId: task.id,
+			agentId: "old-agent",
+			runId: oldRunId,
+			result: { status: "completed", summary: "late result" },
+		});
+
+		expect(late.applied).toBe(false);
+		expect((await store.get(task.id))?.ownerAgentId).toBe("new-agent");
+	});
+
+	test("cancels a root and descendants while returning active bindings", async () => {
+		const store = await createStore();
+		const [root, child] = await store.createBatch([
+			{ clientId: "root", subject: "Root", blockedBy: [] },
+			{ clientId: "child", subject: "Child", blockedBy: ["root"] },
+		]);
+		if (!root || !child) {
+			throw new Error("expected root and child");
+		}
+		await store.reserve({
+			taskId: root.id,
+			agentId: "agent-root",
+			runId: "00000000-0000-4000-8000-000000000001",
+		});
+		const running = await store.get(root.id);
+		if (!running) {
+			throw new Error("expected the running task");
+		}
+		const outcome = await store.update(
+			{
+				taskId: root.id,
+				action: "cancel",
+				expectedVersion: running.version,
+				idempotencyKey: "cancel-root",
+				reason: "user cancelled",
+				cascade: true,
+			},
+			{ agentId: "main", isRoot: true },
+		);
+
+		expect(outcome.cancelledBindings).toEqual([
+			{
+				agentId: "agent-root",
+				runId: "00000000-0000-4000-8000-000000000001",
+				taskId: root.id,
+			},
+		]);
+		expect((await store.get(root.id))?.status).toBe("cancelled");
+		expect((await store.get(child.id))?.status).toBe("cancelled");
+	});
+});
+
+async function createStore(): Promise<PersistentTaskStore> {
+	const directory = await mkdtemp(join(tmpdir(), "cagent-task-store-"));
+	temporaryDirectories.push(directory);
+	return new PersistentTaskStore(directory, "test-session");
+}

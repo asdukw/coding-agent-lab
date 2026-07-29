@@ -778,6 +778,12 @@ export function App({
 	);
 
 	useEffect(() => {
+		if (agentState) {
+			agentRuntime.attach(agentState);
+		}
+	}, [agentRuntime, agentState]);
+
+	useEffect(() => {
 		appLifecycle.registerStopProducer(async () => {
 			await agentRuntime.shutdown();
 		});

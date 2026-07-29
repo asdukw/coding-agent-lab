@@ -1,4 +1,11 @@
 import type { AgentState, Message } from "../state";
+import type {
+	Task,
+	TaskDraft,
+	TaskStatus,
+	TaskUpdateOutcome,
+	TaskUpdateRequest,
+} from "../tasks";
 import type { ToolExecution } from "../toolExecutionMemory";
 import type { AgentKind } from "./identity";
 
@@ -52,8 +59,11 @@ export type AgentRecord = {
 	depth: number;
 	background: boolean;
 	status: AgentStatus;
+	taskId?: string;
+	runId?: string;
 	createdAt: string;
 	startedAt?: string;
+	lastHeartbeatAt?: string;
 	completedAt?: string;
 	result?: AgentResult;
 	error?: string;
@@ -72,15 +82,38 @@ export type SpawnAgentResponse =
 	  };
 
 export type AgentRuntimeEvent = {
-	type: "agent_status" | "inbox";
+	type: "agent_status" | "inbox" | "scheduler_stalled" | "scheduler_error";
 	agentId: string;
 	recipientId?: string;
 	record?: AgentRecord;
+	message?: string;
 };
 
 export type AgentRuntimeListener = (event: AgentRuntimeEvent) => void;
 
+export type TaskRuntime = {
+	create(
+		requesterState: AgentState,
+		drafts: readonly TaskDraft[],
+	): Promise<Task[]>;
+	get(requesterState: AgentState, taskId: string): Promise<Task | undefined>;
+	list(
+		requesterState: AgentState,
+		filter?: {
+			readyOnly?: boolean;
+			status?: readonly TaskStatus[];
+			unownedOnly?: boolean;
+		},
+	): Promise<Task[]>;
+	update(
+		requesterState: AgentState,
+		request: TaskUpdateRequest,
+	): Promise<TaskUpdateOutcome>;
+};
+
 export type AgentRuntime = {
+	readonly tasks?: TaskRuntime;
+	attach?(state: AgentState): void;
 	spawn(
 		parentState: AgentState,
 		request: SpawnAgentRequest,

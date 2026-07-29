@@ -16,14 +16,8 @@ import {
 	EXIT_PLAN_MODE_TOOL_NAME,
 	UPDATE_PLAN_TOOL_NAME,
 } from "../tools/planToolNames";
-import {
-	TASK_CLAIM_TOOL_NAME,
-	TASK_CREATE_TOOL_NAME,
-	TASK_GET_TOOL_NAME,
-	TASK_LIST_TOOL_NAME,
-	TASK_UPDATE_TOOL_NAME,
-} from "../tools/taskTools";
 import { SHELL_TOOL_NAME } from "../tools/shellTool";
+import { TASK_CREATE_TOOL_NAME, TASK_LIST_TOOL_NAME } from "../tools/taskTools";
 import type { Tools } from "../tools/types";
 import { toToolSpecs } from "../tools/types";
 import type { AgentIdentity } from "./identity";
@@ -175,10 +169,7 @@ function toolsForAgent(identity: AgentIdentity, tools: Tools): Tools {
 			tool.name !== EXIT_PLAN_MODE_TOOL_NAME &&
 			tool.name !== UPDATE_PLAN_TOOL_NAME &&
 			tool.name !== TASK_CREATE_TOOL_NAME &&
-			tool.name !== TASK_GET_TOOL_NAME &&
 			tool.name !== TASK_LIST_TOOL_NAME &&
-			tool.name !== TASK_CLAIM_TOOL_NAME &&
-			tool.name !== TASK_UPDATE_TOOL_NAME &&
 			tool.name !== SHELL_TOOL_NAME &&
 			!tool.name.startsWith("mcp__"),
 	);

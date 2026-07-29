@@ -1,11 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import type { AgentIdentity } from "./agents/identity";
-import {
-	createEmptyTaskGraph,
-	normalizeTaskGraph,
-	type TaskGraphState,
-} from "./tasks";
 import type { ToolExecution } from "./toolExecutionMemory";
 import type { ToolSpec } from "./tools/types";
 
@@ -173,7 +168,6 @@ export type AgentState = {
 	toolSpecs: ToolSpec[];
 	toolPermissionContext: ToolPermissionContext;
 	plan: RuntimePlan;
-	taskGraph: TaskGraphState;
 	messages: Message[];
 	todos: TodoItem[];
 	observations: Observation[];
@@ -220,7 +214,6 @@ export function createInitialState(
 		toolSpecs: tools,
 		toolPermissionContext: createToolPermissionContext(cwd),
 		plan: createEmptyPlan(),
-		taskGraph: createEmptyTaskGraph(),
 		messages: [{ role: "user", content: task }],
 		todos: [],
 		observations: [],
@@ -299,7 +292,6 @@ export function ensureToolPermissionContext(state: AgentState): AgentState {
 			state.cwd,
 		),
 		plan: state.plan ?? createEmptyPlan(),
-		taskGraph: normalizeTaskGraph(state.taskGraph),
 	};
 }
 

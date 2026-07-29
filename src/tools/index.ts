@@ -18,7 +18,6 @@ import { readTool } from "./readTool";
 import { shellTool } from "./shellTool";
 import {
 	TASK_TOOLS,
-	taskClaimTool,
 	taskCreateTool,
 	taskGetTool,
 	taskListTool,
@@ -55,7 +54,6 @@ export {
 	sendAgentMessageTool,
 	shellTool,
 	spawnSubagentTool,
-	taskClaimTool,
 	taskCreateTool,
 	taskGetTool,
 	taskListTool,
