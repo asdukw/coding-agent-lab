@@ -1,9 +1,9 @@
 import { resolve } from "node:path";
-import { glob } from "glob";
 import { z } from "zod";
 import { hasDangerFullAccess } from "../state";
 import { isSafeWorkspaceReadPath } from "./permissions";
 import { fileResourceAccesses, resolveToolPath } from "./resourceLock";
+import { runRipgrep } from "./ripgrep";
 import type { Tool } from "./types";
 
 const inputSchema = z.object({
@@ -35,7 +35,14 @@ export const globTool: Tool<Input, Output> = {
 		const state = context?.getState();
 		const workspaceRoot = state?.cwd ?? cwd;
 		const dangerFullAccess = state ? hasDangerFullAccess(state) : false;
-		const discovered = await glob(pattern, { cwd });
+		const { stdout } = await runRipgrep(
+			["--files", "--null", "--path-separator", "/", "--glob", pattern],
+			{ cwd, signal: context?.signal },
+		);
+		const discovered = stdout
+			.split("\0")
+			.filter(Boolean)
+			.sort((left, right) => left.localeCompare(right));
 		const safe = await Promise.all(
 			discovered.map((filename) =>
 				isSafeWorkspaceReadPath(

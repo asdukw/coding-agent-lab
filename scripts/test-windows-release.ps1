@@ -35,6 +35,14 @@ try {
 	if (-not (Test-Path -LiteralPath $runnerPath -PathType Leaf)) {
 		throw "The native sandbox runner is not beside cagent.exe."
 	}
+	$ripgrepPath = Join-Path $cagentFiles[0].DirectoryName "rg.exe"
+	if (-not (Test-Path -LiteralPath $ripgrepPath -PathType Leaf)) {
+		throw "The bundled ripgrep executable is not beside cagent.exe."
+	}
+	$ripgrepVersionOutput = (& $ripgrepPath --version | Select-Object -First 1)
+	if ($LASTEXITCODE -ne 0 -or $ripgrepVersionOutput -ne "ripgrep 15.2.0") {
+		throw "Unexpected bundled ripgrep version: $ripgrepVersionOutput"
+	}
 	$licensePath = Join-Path $cagentFiles[0].DirectoryName "LICENSE"
 	if (-not (Test-Path -LiteralPath $licensePath -PathType Leaf)) {
 		throw "The release archive does not contain the project license."
@@ -50,6 +58,12 @@ try {
 		"THIRD_PARTY_LICENSES\BUN-1.3.14-LICENSE.md"
 	if (-not (Test-Path -LiteralPath $bunLicensePath -PathType Leaf)) {
 		throw "The release archive does not contain Bun's pinned license."
+	}
+	foreach ($ripgrepLicenseName in @("RIPGREP-15.2.0-LICENSE-MIT.txt", "RIPGREP-15.2.0-UNLICENSE.txt")) {
+		$ripgrepLicensePath = Join-Path $cagentFiles[0].DirectoryName "THIRD_PARTY_LICENSES\$ripgrepLicenseName"
+		if (-not (Test-Path -LiteralPath $ripgrepLicensePath -PathType Leaf)) {
+			throw "The release archive does not contain ripgrep license material: $ripgrepLicenseName"
+		}
 	}
 
 	[System.IO.File]::WriteAllText((Join-Path $workspaceRoot ".env"), "DEEPSEEK_API_KEY=must-not-be-loaded`n", [System.Text.UTF8Encoding]::new($false))
@@ -87,6 +101,7 @@ try {
 	Write-Output "Windows release smoke test passed."
 	Write-Output "  version: cagent $ExpectedVersion"
 	Write-Output "  runner: sibling executable present"
+	Write-Output "  ripgrep: bundled version 15.2.0"
 	Write-Output "  memory check: clean and read-only"
 	Write-Output "  workspace dotenv/preload: not evaluated"
 } finally {

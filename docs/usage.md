@@ -6,6 +6,7 @@
 
 - Windows 11 x64 是主要运行与开发平台，内置 `Shell` 由 Rust / Win32 runner 执行。
 - 推荐安装 PowerShell 7。cagent 启动时优先解析受信任的 `pwsh.exe`；若只能使用系统 Windows PowerShell 5.1，会打印兼容性警告及升级指引，然后继续以 5.1 fallback 运行。
+- 内置 `Glob` / `Grep` 以 ripgrep 提供文件发现与正则搜索能力。Windows x64 发行版内置固定版本的 `rg.exe`；从源码运行时需确保 `rg` 可从父进程的 `PATH` 启动。
 - Ubuntu 可以运行控制面、离线 Demo 和单元测试，但不会注册内置 `Shell`。
 - 其他平台尚未作为支持目标验证。
 
@@ -21,7 +22,9 @@ winget upgrade --id Microsoft.PowerShell --source winget
 
 [GitHub Release](https://github.com/asdukw/coding-agent-lab/releases/latest) 提供不依赖本机 Bun、Rust、Visual Studio 或 npm link 的 Windows x64 ZIP。下载 ZIP 与同名 `.sha256` 后，先校验 SHA256，再解压到目标仓库之外的稳定目录，例如 `%LOCALAPPDATA%\Programs\CodingAgentLab\current`。
 
-包内的 `cagent.exe` 与 `cagent-windows-sandbox-runner.exe` 必须保持同目录：
+发行版将 `rg.exe` 与许可证一并内置，并由 `cagent.exe` 优先解析同目录副本，不依赖宿主机预装 ripgrep。
+
+包内的 `cagent.exe`、`cagent-windows-sandbox-runner.exe` 与 `rg.exe` 必须保持同目录：
 
 ```powershell
 Set-Location C:\path\to\target-repository

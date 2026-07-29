@@ -2,7 +2,7 @@
 
 Coding Agent Lab distributes a standalone Windows executable built with Bun
 and a native Windows sandbox runner built with Rust. The tables below summarize
-the bundled runtime and the project's direct runtime dependencies for v0.2.0.
+the bundled runtime and the project's direct runtime dependencies for v0.2.1.
 The exact JavaScript and Rust dependency versions come from `bun.lock` and
 `native/windows-sandbox-runner/Cargo.lock`, respectively.
 
@@ -16,6 +16,7 @@ redistributing the binaries or their components.
 | Component | Version | License summary | Upstream and complete terms |
 | --- | --- | --- | --- |
 | Bun standalone runtime | 1.3.14 | Bun itself is MIT-licensed. Bun's tagged license also documents statically linked JavaScriptCore/WebKit under LGPL-2 and additional linked libraries under their respective licenses. | [Bundled Bun v1.3.14 license](THIRD_PARTY_LICENSES/BUN-1.3.14-LICENSE.md) · [Tagged upstream copy](https://github.com/oven-sh/bun/blob/bun-v1.3.14/LICENSE.md) · [Bun source](https://github.com/oven-sh/bun/tree/bun-v1.3.14) |
+| ripgrep | 15.2.0 | MIT OR Unlicense. Both upstream license texts are bundled in the Windows archive. | `THIRD_PARTY_LICENSES/RIPGREP-15.2.0-LICENSE-MIT.txt` · `THIRD_PARTY_LICENSES/RIPGREP-15.2.0-UNLICENSE.txt` · [release](https://github.com/BurntSushi/ripgrep/releases/tag/15.2.0) · [source](https://github.com/BurntSushi/ripgrep/tree/15.2.0) |
 
 The official release workflow pins Bun 1.3.14 and embeds the runtime through
 `Bun.build({ compile: ... })` in `scripts/build-windows-cli.ts`. The repository
@@ -31,7 +32,6 @@ bundled into the standalone CLI where reachable from its entry point. Build-only
 | Package | Locked version | License | Upstream |
 | --- | --- | --- | --- |
 | `@modelcontextprotocol/sdk` | 1.29.0 | MIT | [source](https://github.com/modelcontextprotocol/typescript-sdk) · [package](https://www.npmjs.com/package/@modelcontextprotocol/sdk/v/1.29.0) |
-| `glob` | 13.0.6 | BlueOak-1.0.0 | [source](https://github.com/isaacs/node-glob) · [package](https://www.npmjs.com/package/glob/v/13.0.6) |
 | `ink` | 7.1.0 | MIT | [source](https://github.com/vadimdemedes/ink) · [package](https://www.npmjs.com/package/ink/v/7.1.0) |
 | `ink-text-input` | 6.0.0 | MIT | [source](https://github.com/vadimdemedes/ink-text-input) · [package](https://www.npmjs.com/package/ink-text-input/v/6.0.0) |
 | `openai` | 6.45.0 | Apache-2.0 | [source](https://github.com/openai/openai-node) · [package](https://www.npmjs.com/package/openai/v/6.45.0) |
